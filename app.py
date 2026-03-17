@@ -25,48 +25,49 @@ def load_rules():
         # 文字が長い順に処理することで誤爆を防ぐ
         df['len'] = df['類義語'].str.len()
         df = df.sort_values('len', ascending=False)
-        return dict(zip(df['類義語'], df['統一語句']))
+        return dict(zip(df['類義語'].astype(str), df['統一語句'].astype(str)))
     return {}
 
 rules_dict = load_rules()
 
 def apply_rules_to_text(target_text, rules):
     """
-    正規表現を使い、単語の境界（他の熟語の一部ではない場合）を意識して置換する
+    同じ言葉の場合は色を変えず、違う言葉に変換された場合のみ色を付ける
     """
-    temp_text = target_text
-    # 修正が必要な言葉を「安全な一時タグ」に置き換える
-    for wrong, right in rules.items():
-        if str(wrong) in temp_text:
-            # 特殊ルール：2文字以下の短い単語（会員など）は、
-            # 前後に他の漢字や文字がくっついていない場合のみ置換を試みる（簡易的な境界判定）
-            if len(str(wrong)) <= 2:
-                # 前後に文字がない、または特定の記号がある場合のみ反応させる
-                # 熟語（会員拡大など）を避けるための設定
-                pattern = r'(?<![一-龥])' + re.escape(str(wrong)) + r'(?![一-龥])'
-                temp_text = re.sub(pattern, f"__FIX__{right}__END__", temp_text)
-            else:
-                temp_text = temp_text.replace(str(wrong), f"__FIX__{right}__END__")
+    # 変換箇所を管理するためのリスト
+    # (テキスト, 修正したかどうかのフラグ)
+    segments = [(target_text, False)]
     
-    parts = []
-    segments = re.split(r'(__FIX__|__END__)', temp_text)
-    is_fix = False
-    for seg in segments:
-        if seg == "__FIX__": is_fix = True
-        elif seg == "__END__": is_fix = False
-        elif seg != "": parts.append((seg, is_fix))
-    return parts
+    for wrong, right in rules.items():
+        new_segments = []
+        for text, already_fixed in segments:
+            if already_fixed or wrong not in text:
+                new_segments.append((text, already_fixed))
+                continue
+            
+            # まだ修正されていないセグメントに対して置換を試みる
+            parts = text.split(wrong)
+            for i, part in enumerate(parts):
+                if part != "":
+                    new_segments.append((part, False))
+                if i < len(parts) - 1:
+                    # 【ここがポイント】左と右が違う場合のみ、修正フラグ(True)を立てる
+                    is_real_change = (wrong != right)
+                    new_segments.append((right, is_real_change))
+        segments = new_segments
+        
+    return segments
 
-# --- 各種ファイル修正用関数（中身は前回の「複数箇所対応版」と同様） ---
+# --- 各種ファイル修正用関数 ---
 def repair_docx(file, rules, rgb):
     doc = docx.Document(file)
     for para in doc.paragraphs:
         if any(str(wrong) in para.text for wrong in rules.keys()):
             parts = apply_rules_to_text(para.text, rules)
             para.text = ""
-            for text, color_flag in parts:
+            for text, is_fixed in parts:
                 run = para.add_run(text)
-                if color_flag:
+                if is_fixed: # 実際に変換された場合のみ色を付ける
                     run.font.color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
                     run.bold = True
     out_io = BytesIO()
@@ -82,9 +83,13 @@ def repair_xlsx(file, rules, rgb):
                 if cell.value and isinstance(cell.value, str):
                     parts = apply_rules_to_text(cell.value, rules)
                     new_val = "".join([p[0] for p in parts])
-                    if new_val != cell.value:
+                    # 一箇所でも色付けフラグがあるか確認
+                    has_change = any(p[1] for p in parts)
+                    if has_change:
                         cell.value = new_val
                         cell.font = Font(color=hex_color, bold=True)
+                    else:
+                        cell.value = new_val
     out_io = BytesIO()
     wb.save(out_io)
     return out_io.getvalue()
@@ -99,10 +104,10 @@ def repair_pptx(file, rules, rgb):
                     if any(str(wrong) in combined_text for wrong in rules.keys()):
                         parts = apply_rules_to_text(combined_text, rules)
                         paragraph.text = ""
-                        for text, color_flag in parts:
+                        for text, is_fixed in parts:
                             new_run = paragraph.add_run()
                             new_run.text = text
-                            if color_flag:
+                            if is_fixed:
                                 new_run.font.color.rgb = PptxRGBColor(rgb[0], rgb[1], rgb[2])
     out_io = BytesIO()
     prs.save(out_io)
