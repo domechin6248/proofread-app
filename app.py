@@ -5,17 +5,18 @@ import openpyxl
 from pptx import Presentation
 import pdfplumber
 import os
+from io import BytesIO
 
 # 1. ページ設定
 st.set_page_config(
-    page_title="2026年度 川内JC 統一ルール校正ツール",
+    page_title="2026年度 川内JC 統一ルール校正・修正ツール",
     page_icon="⚓",
     layout="wide"
 )
 
-# 2. タイトルと説明（サイドバーなしでスッキリさせました）
-st.title("⚓ 2026年度 川内JC 統一ルール校正システム")
-st.write("Word, Excel, PowerPoint, PDFをドロップして一括チェックできます。")
+# 2. タイトル
+st.title("⚓ 2026年度 川内JC 統一ルール 修正システム")
+st.write("ファイルをアップロードすると、自動で修正案を適用したファイルをダウンロードできます。")
 
 # 3. ルールの読み込み
 @st.cache_data
@@ -29,67 +30,74 @@ def load_rules():
 
 rules_dict = load_rules()
 
-# 4. ファイルアップロード
+# 4. 修正処理の定義
+def repair_docx(file, rules):
+    doc = docx.Document(file)
+    for para in doc.paragraphs:
+        for wrong, right in rules.items():
+            if str(wrong) in para.text:
+                # 書式を維持するために、各ラン（文字の塊）ごとに置換
+                for run in para.runs:
+                    run.text = run.text.replace(str(wrong), str(right))
+    out_io = BytesIO()
+    doc.save(out_io)
+    return out_io.getvalue()
+
+def repair_xlsx(file, rules):
+    wb = openpyxl.load_workbook(file)
+    for sheet in wb.worksheets:
+        for row in sheet.iter_rows():
+            for cell in row:
+                if cell.value and isinstance(cell.value, str):
+                    for wrong, right in rules.items():
+                        cell.value = cell.value.replace(str(wrong), str(right))
+    out_io = BytesIO()
+    wb.save(out_io)
+    return out_io.getvalue()
+
+def repair_pptx(file, rules):
+    prs = Presentation(file)
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if hasattr(shape, "text_frame") and shape.text_frame:
+                for paragraph in shape.text_frame.paragraphs:
+                    for run in paragraph.runs:
+                        for wrong, right in rules.items():
+                            run.text = run.text.replace(str(wrong), str(right))
+    out_io = BytesIO()
+    prs.save(out_io)
+    return out_io.getvalue()
+
+# 5. メイン処理
 uploaded_files = st.file_uploader(
-    "チェックしたいファイルをドロップしてください（複数可）", 
-    type=["docx", "xlsx", "pptx", "pdf"], 
+    "ファイルをドロップしてください", 
+    type=["docx", "xlsx", "pptx"], # PDFは編集不可のため除外
     accept_multiple_files=True
 )
 
-def check_text(text, filename, location):
-    found = []
-    if not isinstance(text, str):
-        return found
-    for wrong, right in rules_dict.items():
-        if str(wrong) in text:
-            found.append({
-                "ファイル名": filename, 
-                "箇所": location, 
-                "指摘内容": f"「{wrong}」が含まれています",
-                "修正案": f"「{right}」に統一してください"
-            })
-    return found
-
-# 5. 解析処理
 if uploaded_files:
-    all_errors = []
-    progress_bar = st.progress(0)
-    
-    for idx, file in enumerate(uploaded_files):
+    st.divider()
+    for file in uploaded_files:
         ext = file.name.split('.')[-1].lower()
         
-        if ext == "docx":
-            doc = docx.Document(file)
-            for i, para in enumerate(doc.paragraphs):
-                all_errors.extend(check_text(para.text, file.name, f"{i+1}行目"))
-        
-        elif ext == "xlsx":
-            wb = openpyxl.load_workbook(file, data_only=True)
-            for sheet in wb.worksheets:
-                for row_idx, row in enumerate(sheet.iter_rows(values_only=True)):
-                    for cell_idx, cell_value in enumerate(row):
-                        if cell_value:
-                            all_errors.extend(check_text(str(cell_value), file.name, f"シート:{sheet.title} ({row_idx+1}行目)"))
+        with st.status(f"🛠 {file.name} を修正中...", expanded=False):
+            if ext == "docx":
+                repaired_data = repair_docx(file, rules_dict)
+                mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            elif ext == "xlsx":
+                repaired_data = repair_xlsx(file, rules_dict)
+                mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            elif ext == "pptx":
+                repaired_data = repair_pptx(file, rules_dict)
+                mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            
+            st.write("修正が完了しました。")
+            st.download_button(
+                label=f"📥 修正済みの {file.name} を保存",
+                data=repaired_data,
+                file_name=f"【修正済】{file.name}",
+                mime=mime,
+                key=file.name
+            )
 
-        elif ext == "pptx":
-            prs = Presentation(file)
-            for i, slide in enumerate(prs.slides):
-                for shape in slide.shapes:
-                    if hasattr(shape, "text"):
-                        all_errors.extend(check_text(shape.text, file.name, f"{i+1}枚目スライド"))
-
-        elif ext == "pdf":
-            with pdfplumber.open(file) as pdf:
-                for i, page in enumerate(pdf.pages):
-                    text = page.extract_text()
-                    if text:
-                        all_errors.extend(check_text(text, file.name, f"{i+1}ページ目"))
-        
-        progress_bar.progress((idx + 1) / len(uploaded_files))
-
-    st.divider()
-    if all_errors:
-        st.warning(f"⚠️ {len(all_errors)} 件の修正推奨箇所が見つかりました。")
-        st.table(pd.DataFrame(all_errors))
-    else:
-        st.success("✨ チェック完了！すべての資料で統一ルールが守られています。")
+    st.info("※PDFは技術的に「上書き修正」ができないため、Word等で修正してからPDF化することをお勧めします。")
