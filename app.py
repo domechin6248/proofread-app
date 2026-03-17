@@ -23,7 +23,6 @@ selected_rgb = color_map[color_option]
 def load_rules():
     if os.path.exists('rules.csv'):
         df = pd.read_csv('rules.csv')
-        # 文字が長い順に並び替えて、部分一致による誤爆を防ぐ
         df['len'] = df['類義語'].astype(str).str.len()
         df = df.sort_values('len', ascending=False)
         return dict(zip(df['類義語'].astype(str), df['統一語句'].astype(str)))
@@ -33,13 +32,7 @@ rules_dict = load_rules()
 
 # 3. 修正・色付け・熟語保護ロジック
 def apply_rules_to_text(target_text, rules):
-    """
-    1. 左右が同じルール（保護）は色を変えない
-    2. 2文字以下の言葉（会員など）は、前後に漢字がある場合は熟語とみなして無視する
-    """
-    # (テキスト, 修正確定フラグ) のリスト
     segments = [(target_text, False)]
-    
     for wrong, right in rules.items():
         new_segments = []
         for text, already_fixed in segments:
@@ -47,14 +40,9 @@ def apply_rules_to_text(target_text, rules):
                 new_segments.append((text, already_fixed))
                 continue
             
-            # 2文字以下の短い言葉（会員など）への境界判定ロジック
-            # 前後に漢字 [一-龥] がある場合は、熟語の一部とみなしてスキップ
             if len(wrong) <= 2:
-                # 正規表現で「前後に漢字がない場合のみ」を対象に分割
                 pattern = f'(?<![一-龥]){re.escape(wrong)}(?![一-龥])'
                 split_parts = re.split(f'({pattern})', text)
-                
-                # re.splitの結果、patternに合致した部分はそのままwrongとして出てくる
                 for part in split_parts:
                     if part == wrong:
                         is_real_change = (wrong != right)
@@ -62,7 +50,6 @@ def apply_rules_to_text(target_text, rules):
                     elif part != "":
                         new_segments.append((part, False))
             else:
-                # 3文字以上の長いルールは通常通り分割
                 parts = text.split(wrong)
                 for i, part in enumerate(parts):
                     if part != "":
@@ -71,10 +58,9 @@ def apply_rules_to_text(target_text, rules):
                         is_real_change = (wrong != right)
                         new_segments.append((right, is_real_change))
         segments = new_segments
-        
     return segments
 
-# --- 各種ファイル修正用関数（前回のロジックを継承） ---
+# --- 各種ファイル修正用関数 ---
 def repair_docx(file, rules, rgb):
     doc = docx.Document(file)
     for para in doc.paragraphs:
@@ -126,12 +112,20 @@ def repair_pptx(file, rules, rgb):
     prs.save(out_io)
     return out_io.getvalue()
 
+# 4. メイン処理
 uploaded_files = st.file_uploader("ファイルをアップロード", type=["docx", "xlsx", "pptx"], accept_multiple_files=True)
 if uploaded_files:
-    for file in uploaded_files:
+    for idx, file in enumerate(uploaded_files):
         ext = file.name.split('.')[-1].lower()
         with st.spinner(f"{file.name} を処理中..."):
             if ext == "docx": data = repair_docx(file, rules_dict, selected_rgb)
             elif ext == "xlsx": data = repair_xlsx(file, rules_dict, selected_rgb)
             elif ext == "pptx": data = repair_pptx(file, rules_dict, selected_rgb)
-            st.download_button(label=f"📥 修正済みの {file.name} を保存", data=data, file_name=f"【完成版】{file.name}")
+            
+            # 【修正点】keyにインデックス(idx)を追加して重複エラーを回避
+            st.download_button(
+                label=f"📥 修正済みの {file.name} を保存", 
+                data=data, 
+                file_name=f"【完成版】{file.name}",
+                key=f"dl_btn_{file.name}_{idx}"
+            )
