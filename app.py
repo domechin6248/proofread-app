@@ -6,40 +6,30 @@ from pptx import Presentation
 import pdfplumber
 import os
 
-# 1. ページ設定（ブラウザのタブに表示される情報）
+# 1. ページ設定
 st.set_page_config(
-    page_title="川内JC 2026年度 統一ルール校正ツール",
+    page_title="2026年度 川内JC 統一ルール校正ツール",
     page_icon="⚓",
     layout="wide"
 )
 
-# 2. サイドバーの設定（監事メッセージ）
-with st.sidebar:
-    st.header("⚓ 監事の視点")
-    st.info("「正確な語句の使用は、組織の信頼に直結します。一文字の妥協が、組織の品格を左右することを忘れないでください。」")
-    st.write("---")
-    st.caption("2026年度 監事監修ツール")
-    st.write("対象：Word, Excel, PPT, PDF")
-
-# 3. タイトルと説明
+# 2. タイトルと説明（サイドバーなしでスッキリさせました）
 st.title("⚓ 2026年度 川内JC 統一ルール校正システム")
-st.markdown("### ～ 薩摩川内の未来を創る、正確な資料作りを ～")
-st.write("資料をアップロードすると、統一語句や書式を自動で一括チェックします。")
+st.write("Word, Excel, PowerPoint, PDFをドロップして一括チェックできます。")
 
-# 4. ルールの読み込み（キャッシュ機能で高速化）
+# 3. ルールの読み込み
 @st.cache_data
 def load_rules():
     if os.path.exists('rules.csv'):
         df = pd.read_csv('rules.csv')
-        # 1行目の項目名が「類義語」「統一語句」であることを想定
         return dict(zip(df['類義語'], df['統一語句']))
     else:
-        st.error("rules.csv が見つかりません。GitHubのトップページに配置してください。")
+        st.error("rules.csv が見つかりません。")
         return {}
 
 rules_dict = load_rules()
 
-# 5. ファイルアップロード（複数・多形式対応）
+# 4. ファイルアップロード
 uploaded_files = st.file_uploader(
     "チェックしたいファイルをドロップしてください（複数可）", 
     type=["docx", "xlsx", "pptx", "pdf"], 
@@ -60,7 +50,7 @@ def check_text(text, filename, location):
             })
     return found
 
-# 6. 解析処理
+# 5. 解析処理
 if uploaded_files:
     all_errors = []
     progress_bar = st.progress(0)
@@ -68,13 +58,11 @@ if uploaded_files:
     for idx, file in enumerate(uploaded_files):
         ext = file.name.split('.')[-1].lower()
         
-        # Word
         if ext == "docx":
             doc = docx.Document(file)
             for i, para in enumerate(doc.paragraphs):
                 all_errors.extend(check_text(para.text, file.name, f"{i+1}行目"))
         
-        # Excel
         elif ext == "xlsx":
             wb = openpyxl.load_workbook(file, data_only=True)
             for sheet in wb.worksheets:
@@ -83,7 +71,6 @@ if uploaded_files:
                         if cell_value:
                             all_errors.extend(check_text(str(cell_value), file.name, f"シート:{sheet.title} ({row_idx+1}行目)"))
 
-        # PowerPoint
         elif ext == "pptx":
             prs = Presentation(file)
             for i, slide in enumerate(prs.slides):
@@ -91,7 +78,6 @@ if uploaded_files:
                     if hasattr(shape, "text"):
                         all_errors.extend(check_text(shape.text, file.name, f"{i+1}枚目スライド"))
 
-        # PDF
         elif ext == "pdf":
             with pdfplumber.open(file) as pdf:
                 for i, page in enumerate(pdf.pages):
@@ -101,7 +87,6 @@ if uploaded_files:
         
         progress_bar.progress((idx + 1) / len(uploaded_files))
 
-    # 7. 結果表示
     st.divider()
     if all_errors:
         st.warning(f"⚠️ {len(all_errors)} 件の修正推奨箇所が見つかりました。")
