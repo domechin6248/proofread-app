@@ -124,28 +124,30 @@ def apply_rules_to_text(target_text, rules, for_reporting=False):
                         
     return final_segments
 
-# --- 網掛け（背景色）判定ロジック ---
+# --- 網掛け（背景色）検知機能 ---
 def is_word_shaded(para):
-    """Wordの段落や表のセルに「網掛け（背景色）」があるか判定する"""
     try:
-        # 1. 段落自体の網掛けチェック
+        # 1. 段落そのものに網掛けがあるか
         pPr = para._p.pPr
         if pPr is not None:
             shd = pPr.find(qn('w:shd'))
             if shd is not None:
+                val = shd.get(qn('w:val'))
                 fill = shd.get(qn('w:fill'))
-                if fill and fill not in ['auto', 'FFFFFF', 'clear', '000000']:
-                    return True
-        # 2. 表のセル（大項目など）の背景色チェック
+                if val and val != 'clear': return True
+                if fill and fill not in ['auto', 'FFFFFF', 'clear']: return True
+                
+        # 2. 表のセルに背景色が塗られているか
         parent = para._p.getparent()
         if parent is not None and parent.tag.endswith('tc'):
             tcPr = parent.find(qn('w:tcPr'))
             if tcPr is not None:
                 shd = tcPr.find(qn('w:shd'))
                 if shd is not None:
+                    val = shd.get(qn('w:val'))
                     fill = shd.get(qn('w:fill'))
-                    if fill and fill not in ['auto', 'FFFFFF', 'clear', '000000']:
-                        return True
+                    if val and val != 'clear': return True
+                    if fill and fill not in ['auto', 'FFFFFF', 'clear']: return True
     except:
         pass
     return False
@@ -156,12 +158,18 @@ def repair_docx(file, rules, rgb):
     
     def process_paragraphs(paragraphs):
         for para in paragraphs:
-            # 網掛けされているか（大項目か）を自動検知
+            # 網掛けされているか（大項目か）を判定
             is_shaded = is_word_shaded(para)
             
+            # 元のフォントサイズと太字設定を記録（網掛け保護用）
+            orig_bold, orig_size = None, None
+            if para.runs and para.runs[0].font:
+                orig_bold = para.runs[0].font.bold
+                orig_size = para.runs[0].font.size
+
             parts = apply_rules_to_text(para.text, rules, for_reporting=False)
             
-            # 文字修正がある、半角化がある、または網掛けではない(10.5ptにする必要がある)場合
+            # 修正・半角化があった場合、または網掛けではない（10.5ptにする必要がある）場合
             if any(p[2] for p in parts) or any(p[3] for p in parts) or not is_shaded:
                 para.text = ""
                 for orig, curr, is_fixed, is_alnum in parts:
@@ -170,13 +178,18 @@ def repair_docx(file, rules, rgb):
                     run.font.name = 'ＭＳ 明朝'
                     run._element.rPr.rFonts.set(qn('w:eastAsia'), 'ＭＳ 明朝')
                     
-                    # 網掛け（大項目）でなければ、文字サイズを「10.5pt」に強制設定
-                    if not is_shaded:
+                    if is_shaded:
+                        # 網掛け部分：元の太字とサイズを完全に復元
+                        if orig_size is not None: run.font.size = orig_size
+                        if orig_bold is not None: run.font.bold = orig_bold
+                        # 修正箇所なら色だけ変える
+                        if is_fixed: run.font.color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
+                    else:
+                        # 通常部分：10.5ptに統一
                         run.font.size = Pt(10.5)
-                        
-                    if is_fixed:
-                        run.font.color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
-                        run.bold = False
+                        if is_fixed:
+                            run.font.color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
+                            run.bold = False
 
     # 本文と表（テーブル）の中身を処理
     process_paragraphs(doc.paragraphs)
@@ -202,16 +215,22 @@ def repair_xlsx(file, rules, rgb):
                         if cell.fill.fgColor.rgb and cell.fill.fgColor.rgb not in ['00000000', 'FFFFFFFF', '00FFFFFF']:
                             is_shaded = True
 
+                    orig_bold = cell.font.bold if cell.font else False
+                    orig_size = cell.font.size if cell.font else 11
+
                     parts = apply_rules_to_text(cell.value, rules, for_reporting=False)
                     
                     if any(p[2] for p in parts) or any(p[3] for p in parts) or not is_shaded:
                         cell.value = "".join([p[1] for p in parts])
                         is_fixed_present = any(p[2] for p in parts)
                         
-                        # 色とフォントの適用
                         new_color = hex_color if is_fixed_present else (cell.font.color if cell.font else None)
-                        new_size = 10.5 if not is_shaded else (cell.font.size if cell.font else 11)
-                        cell.font = Font(name='ＭＳ 明朝', size=new_size, color=new_color, bold=False)
+                        
+                        # 網掛けセルはサイズと太字を維持、通常は10.5ptで太字解除
+                        new_size = orig_size if is_shaded else 10.5
+                        new_bold = orig_bold if is_shaded else False
+                        
+                        cell.font = Font(name='ＭＳ 明朝', size=new_size, color=new_color, bold=new_bold)
                         
     out_io = BytesIO()
     wb.save(out_io)
@@ -221,7 +240,6 @@ def repair_pptx(file, rules, rgb):
     prs = Presentation(file)
     for slide in prs.slides:
         for shape in slide.shapes:
-            # PowerPointの色塗り判定（単純化）
             is_shaded = False
             if hasattr(shape, "fill") and shape.fill.type == 1:
                 is_shaded = True
@@ -267,7 +285,6 @@ def check_pdf(file, rules):
                     end_idx = min(len(full_text), current_idx + len(curr) + 15)
                     context = full_text[start_idx:end_idx]
                     
-                    # 半角化のみの場合はメッセージを変える
                     reason = "英数字の半角化" if orig.translate(str.maketrans("ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ０１２３４５６７８９", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")) == curr and orig != curr else "統一ルールの適用"
                     
                     results.append({
