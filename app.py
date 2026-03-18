@@ -1,8 +1,8 @@
 import streamlit as st
 import pandas as pd
 import docx
-from docx.shared import RGBColor
-from docx.oxml.ns import qn  # Wordのフォント設定用
+from docx.shared import RGBColor, Pt
+from docx.oxml.ns import qn
 import openpyxl
 from openpyxl.styles import Font
 from pptx import Presentation
@@ -57,7 +57,6 @@ def apply_rules_to_text(target_text, rules, for_reporting=False):
             keep_words.append(str(k))
             
     keep_words = sorted(keep_words, key=len, reverse=True)
-    
     protected_text = target_text
     placeholders = {}
     
@@ -93,11 +92,9 @@ def apply_rules_to_text(target_text, rules, for_reporting=False):
                 temp_curr = temp_curr.replace(placeholder, original_word)
         restored_segments.append((temp_orig, temp_curr, is_fixed))
 
-    # 全角英数字を半角にする（記号は無視）
     ZEN_ALNUM = "ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ０１２３４５６７８９"
     HAN_ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
     ZEN2HAN_MAP = str.maketrans(ZEN_ALNUM, HAN_ALNUM)
-    
     alnum_pattern = r'([A-Za-z0-9Ａ-Ｚａ-ｚ０-９]+)'
     final_segments = []
     
@@ -127,44 +124,62 @@ def apply_rules_to_text(target_text, rules, for_reporting=False):
                         
     return final_segments
 
+# --- 網掛け（背景色）判定ロジック ---
+def is_word_shaded(para):
+    """Wordの段落や表のセルに「網掛け（背景色）」があるか判定する"""
+    try:
+        # 1. 段落自体の網掛けチェック
+        pPr = para._p.pPr
+        if pPr is not None:
+            shd = pPr.find(qn('w:shd'))
+            if shd is not None:
+                fill = shd.get(qn('w:fill'))
+                if fill and fill not in ['auto', 'FFFFFF', 'clear', '000000']:
+                    return True
+        # 2. 表のセル（大項目など）の背景色チェック
+        parent = para._p.getparent()
+        if parent is not None and parent.tag.endswith('tc'):
+            tcPr = parent.find(qn('w:tcPr'))
+            if tcPr is not None:
+                shd = tcPr.find(qn('w:shd'))
+                if shd is not None:
+                    fill = shd.get(qn('w:fill'))
+                    if fill and fill not in ['auto', 'FFFFFF', 'clear', '000000']:
+                        return True
+    except:
+        pass
+    return False
+
 # --- ファイル修正用関数 ---
 def repair_docx(file, rules, rgb):
     doc = docx.Document(file)
     
-    # Word全体のデフォルトフォントをMS明朝に
-    if 'Normal' in doc.styles:
-        style = doc.styles['Normal']
-        if style.font:
-            style.font.name = 'ＭＳ 明朝'
-            if style.element.rPr is not None:
-                style.element.rPr.rFonts.set(qn('w:eastAsia'), 'ＭＳ 明朝')
-
-    # 段落処理の共通関数
     def process_paragraphs(paragraphs):
         for para in paragraphs:
+            # 網掛けされているか（大項目か）を自動検知
+            is_shaded = is_word_shaded(para)
+            
             parts = apply_rules_to_text(para.text, rules, for_reporting=False)
             
-            # 修正や半角化があった場合、新しく書き直して全部MS明朝
-            if any(p[2] for p in parts) or any(p[3] for p in parts):
+            # 文字修正がある、半角化がある、または網掛けではない(10.5ptにする必要がある)場合
+            if any(p[2] for p in parts) or any(p[3] for p in parts) or not is_shaded:
                 para.text = ""
                 for orig, curr, is_fixed, is_alnum in parts:
                     run = para.add_run(curr)
-                    # 【Word限定】英数字や日本語に関係なくすべてMS明朝
+                    # 無条件でMS明朝
                     run.font.name = 'ＭＳ 明朝'
                     run._element.rPr.rFonts.set(qn('w:eastAsia'), 'ＭＳ 明朝')
+                    
+                    # 網掛け（大項目）でなければ、文字サイズを「10.5pt」に強制設定
+                    if not is_shaded:
+                        run.font.size = Pt(10.5)
+                        
                     if is_fixed:
                         run.font.color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
                         run.bold = False
-            else:
-                # 修正がない部分も、既存の文字を強制的にMS明朝に変える
-                for run in para.runs:
-                    run.font.name = 'ＭＳ 明朝'
-                    run._element.rPr.rFonts.set(qn('w:eastAsia'), 'ＭＳ 明朝')
 
-    # 本文の処理
+    # 本文と表（テーブル）の中身を処理
     process_paragraphs(doc.paragraphs)
-    
-    # 【追加機能】表（テーブル）の中身も処理
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
@@ -181,17 +196,23 @@ def repair_xlsx(file, rules, rgb):
         for row in sheet.iter_rows():
             for cell in row:
                 if cell.value and isinstance(cell.value, str):
+                    # Excelでの背景色判定
+                    is_shaded = False
+                    if cell.fill and cell.fill.patternType and cell.fill.patternType != 'none':
+                        if cell.fill.fgColor.rgb and cell.fill.fgColor.rgb not in ['00000000', 'FFFFFFFF', '00FFFFFF']:
+                            is_shaded = True
+
                     parts = apply_rules_to_text(cell.value, rules, for_reporting=False)
-                    if any(p[2] for p in parts) or any(p[3] for p in parts):
+                    
+                    if any(p[2] for p in parts) or any(p[3] for p in parts) or not is_shaded:
                         cell.value = "".join([p[1] for p in parts])
-                        is_alnum_present = any(p[3] for p in parts)
                         is_fixed_present = any(p[2] for p in parts)
                         
-                        current_font_name = cell.font.name if cell.font and cell.font.name else None
-                        new_font_name = 'ＭＳ 明朝' if is_alnum_present else current_font_name
+                        # 色とフォントの適用
                         new_color = hex_color if is_fixed_present else (cell.font.color if cell.font else None)
+                        new_size = 10.5 if not is_shaded else (cell.font.size if cell.font else 11)
+                        cell.font = Font(name='ＭＳ 明朝', size=new_size, color=new_color, bold=False)
                         
-                        cell.font = Font(name=new_font_name, color=new_color, bold=False)
     out_io = BytesIO()
     wb.save(out_io)
     return out_io.getvalue()
@@ -200,17 +221,24 @@ def repair_pptx(file, rules, rgb):
     prs = Presentation(file)
     for slide in prs.slides:
         for shape in slide.shapes:
+            # PowerPointの色塗り判定（単純化）
+            is_shaded = False
+            if hasattr(shape, "fill") and shape.fill.type == 1:
+                is_shaded = True
+                
             if hasattr(shape, "text_frame") and shape.text_frame:
                 for paragraph in shape.text_frame.paragraphs:
                     combined_text = "".join(run.text for run in paragraph.runs)
                     parts = apply_rules_to_text(combined_text, rules, for_reporting=False)
-                    if any(p[2] for p in parts) or any(p[3] for p in parts):
+                    
+                    if any(p[2] for p in parts) or any(p[3] for p in parts) or not is_shaded:
                         paragraph.text = ""
                         for orig, curr, is_fixed, is_alnum in parts:
                             new_run = paragraph.add_run()
                             new_run.text = curr
-                            if is_alnum:
-                                new_run.font.name = 'ＭＳ 明朝'
+                            new_run.font.name = 'ＭＳ 明朝'
+                            if not is_shaded:
+                                new_run.font.size = Pt(10.5)
                             if is_fixed:
                                 new_run.font.color.rgb = PptxRGBColor(rgb[0], rgb[1], rgb[2])
                                 new_run.font.bold = False
@@ -239,10 +267,14 @@ def check_pdf(file, rules):
                     end_idx = min(len(full_text), current_idx + len(curr) + 15)
                     context = full_text[start_idx:end_idx]
                     
+                    # 半角化のみの場合はメッセージを変える
+                    reason = "英数字の半角化" if orig.translate(str.maketrans("ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ０１２３４５６７８９", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")) == curr and orig != curr else "統一ルールの適用"
+                    
                     results.append({
                         "ページ": i + 1,
                         "NGワード": orig,
                         "修正案": curr,
+                        "修正理由": reason,
                         "周辺の文章": f"...{context}..."
                     })
                 current_idx += len(curr)
