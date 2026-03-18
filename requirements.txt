@@ -5,4 +5,3 @@ openpyxl
 python-pptx
 pdfplumber
 Pillow
-google-generativeai
