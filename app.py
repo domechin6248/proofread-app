@@ -162,24 +162,54 @@ def repair_docx(file, rules, rgb):
                 orig_bold = para.runs[0].font.bold
                 orig_size = para.runs[0].font.size
 
-            parts = apply_rules_to_text(para.text, rules, for_reporting=False)
+            # 【新機能】段落内の「リンク」と「普通の文字」を分けて抽出
+            elements = []
+            current_text = ""
             
-            if any(p[2] for p in parts) or any(p[3] for p in parts) or not is_shaded:
+            try:
+                # WordのXMLタグを直接走査し、リンクをカプセルごと避難させる
+                for child in list(para._p):
+                    if child.tag.endswith('hyperlink'):
+                        if current_text:
+                            elements.append({"type": "text", "content": current_text})
+                            current_text = ""
+                        # リンクをXMLから引き剥がして保存
+                        elements.append({"type": "link", "element": child})
+                        para._p.remove(child)
+                    elif child.tag.endswith('r') or child.tag.endswith('ins'):
+                        text = "".join([t.text for t in child.xpath('.//w:t') if t.text])
+                        current_text += text
+                        para._p.remove(child)
+                
+                if current_text:
+                    elements.append({"type": "text", "content": current_text})
+            except:
+                elements = [{"type": "text", "content": para.text}]
                 para.text = ""
-                for orig, curr, is_fixed, is_alnum in parts:
-                    run = para.add_run(curr)
-                    run.font.name = 'ＭＳ 明朝'
-                    run._element.rPr.rFonts.set(qn('w:eastAsia'), 'ＭＳ 明朝')
-                    
-                    if is_shaded:
-                        if orig_size is not None: run.font.size = orig_size
-                        if orig_bold is not None: run.font.bold = orig_bold
-                        if is_fixed: run.font.color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
-                    else:
-                        run.font.size = Pt(10.5)
+
+            # 普通の文字にはルールを適用し、リンクはそのまま再配置する
+            for el in elements:
+                if el["type"] == "text":
+                    if not el["content"]: continue
+                    parts = apply_rules_to_text(el["content"], rules, for_reporting=False)
+                    for orig, curr, is_fixed, is_alnum in parts:
+                        run = para.add_run(curr)
+                        run.font.name = 'ＭＳ 明朝'
+                        run._element.rPr.rFonts.set(qn('w:eastAsia'), 'ＭＳ 明朝')
+                        
+                        if is_shaded:
+                            if orig_size is not None: run.font.size = orig_size
+                            if orig_bold is not None: run.font.bold = orig_bold
+                        else:
+                            run.font.size = Pt(10.5)
+                            
                         if is_fixed:
                             run.font.color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
                             run.bold = False
+                            
+                elif el["type"] == "link":
+                    # 避難させていたリンクのカプセルを段落に戻す（機能・見た目すべて完全維持）
+                    para._p.append(el["element"])
 
     process_paragraphs(doc.paragraphs)
     for table in doc.tables:
@@ -194,10 +224,15 @@ def repair_docx(file, rules, rgb):
 def repair_xlsx(file, rules, rgb):
     wb = openpyxl.load_workbook(file)
     hex_color = f"{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
+    
     for sheet in wb.worksheets:
         for row in sheet.iter_rows():
             for cell in row:
                 if cell.value and isinstance(cell.value, str):
+                    # 【新機能】セルにリンクが設定されている場合は、一切修正せず完全スルーする
+                    if cell.hyperlink:
+                        continue
+                        
                     is_shaded = False
                     if cell.fill and cell.fill.patternType and cell.fill.patternType != 'none':
                         if cell.fill.fgColor.rgb and cell.fill.fgColor.rgb not in ['00000000', 'FFFFFFFF', '00FFFFFF']:
@@ -231,6 +266,11 @@ def repair_pptx(file, rules, rgb):
                 
             if hasattr(shape, "text_frame") and shape.text_frame:
                 for paragraph in shape.text_frame.paragraphs:
+                    # 【新機能】段落内にリンクが含まれる場合はスルーして保護する
+                    has_link = any(hasattr(run, "hyperlink") and run.hyperlink and run.hyperlink.address for run in paragraph.runs)
+                    if has_link:
+                        continue
+                        
                     combined_text = "".join(run.text for run in paragraph.runs)
                     parts = apply_rules_to_text(combined_text, rules, for_reporting=False)
                     
@@ -304,5 +344,4 @@ if uploaded_files:
                 elif ext == "xlsx": data = repair_xlsx(file, rules_dict, selected_rgb)
                 elif ext == "pptx": data = repair_pptx(file, rules_dict, selected_rgb)
                 
-                # ★ここを変更しました：元のファイル名をそのまま使用
                 st.download_button(label=f"📥 修正済みの {file.name} を保存", data=data, file_name=file.name, key=f"dl_btn_{idx}")
