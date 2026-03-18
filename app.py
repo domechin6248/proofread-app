@@ -15,14 +15,9 @@ import pdfplumber
 st.set_page_config(page_title="川内JC 統一ルール修正ツール", page_icon="⚓", layout="wide")
 st.title("⚓ 2026年度 川内JC 統一ルール 修正システム")
 
-# 1. 色の設定（オレンジを削除し、黒を追加）
+# 1. 色の設定（黒を追加、太字は後続処理でOFF）
 color_option = st.selectbox("修正箇所の文字色（Word/Excel/PPT用）", ["赤", "青", "緑", "黒"], index=0)
-color_map = {
-    "赤": (255, 0, 0), 
-    "青": (0, 0, 255), 
-    "緑": (0, 128, 0), 
-    "黒": (0, 0, 0)
-}
+color_map = {"赤": (255, 0, 0), "青": (0, 0, 255), "緑": (0, 128, 0), "黒": (0, 0, 0)}
 selected_rgb = color_map[color_option]
 
 # 2. ルールの読み込み
@@ -34,6 +29,7 @@ def load_rules():
         except:
             df = pd.read_csv('rules.csv', encoding='shift-jis')
         
+        # 長い単語から順に処理（誤判定防止）
         df['len'] = df['類義語'].astype(str).str.len()
         df = df.sort_values('len', ascending=False)
         return dict(zip(df['類義語'].astype(str), df['統一語句'].astype(str)))
@@ -45,26 +41,18 @@ rules_dict = load_rules()
 def apply_rules_to_text(target_text, rules):
     # 【絶対保護リスト】
     keep_words = [
-        "会員に成長する機会", 
-        "会員拡大運動", 
-        "正会員", 
-        "新入会員",
-        "日本の青年会議所は", 
-        "希望をもたらす変革の起点として", 
-        "輝く個性が調和する未来を描き",
-        "社会の課題を解決することで", 
-        "持続可能な地域を創ることを誓う",
-        "われわれ JAYCEE は", 
-        "志高き組織ビジョン",
-        "志高き人材育成ビジョン",
-        "志高きまち創造ビジョン"
+        "会員に成長する機会", "会員拡大運動", "正会員", "新入会員",
+        "日本の青年会議所は", "希望をもたらす変革の起点として", 
+        "輝く個性が調和する未来を描き", "社会の課題を解決することで", 
+        "持続可能な地域を創ることを誓う", "われわれ JAYCEE は", 
+        "志高き組織ビジョン", "志高き人材育成ビジョン", "志高きまち創造ビジョン"
     ]
     
     protected_text = target_text
     placeholders = {}
     for i, word in enumerate(keep_words):
         if word in protected_text:
-            placeholder = f"__SAFE_WORD_{i}__"
+            placeholder = f"__SAFE_{i}__"
             placeholders[placeholder] = word
             protected_text = protected_text.replace(word, placeholder)
 
@@ -98,7 +86,7 @@ def apply_rules_to_text(target_text, rules):
             
     return final_segments
 
-# --- 各種ファイル修正用関数（太字設定を解除） ---
+# --- 各種ファイル修正用関数（Word/Excel/PPT） ---
 def repair_docx(file, rules, rgb):
     doc = docx.Document(file)
     for para in doc.paragraphs:
@@ -109,7 +97,7 @@ def repair_docx(file, rules, rgb):
                 run = para.add_run(text)
                 if is_fixed:
                     run.font.color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
-                    run.bold = False  # 太字を解除
+                    run.bold = False
     out_io = BytesIO()
     doc.save(out_io)
     return out_io.getvalue()
@@ -124,7 +112,6 @@ def repair_xlsx(file, rules, rgb):
                     parts = apply_rules_to_text(cell.value, rules)
                     if any(p[1] for p in parts):
                         cell.value = "".join([p[0] for p in parts])
-                        # bold=False で太字を解除
                         cell.font = Font(color=hex_color, bold=False)
     out_io = BytesIO()
     wb.save(out_io)
@@ -145,38 +132,46 @@ def repair_pptx(file, rules, rgb):
                             new_run.text = text
                             if is_fixed:
                                 new_run.font.color.rgb = PptxRGBColor(rgb[0], rgb[1], rgb[2])
-                                new_run.font.bold = False  # 太字を解除
+                                new_run.font.bold = False
     out_io = BytesIO()
     prs.save(out_io)
     return out_io.getvalue()
 
-# --- PDFチェック用関数（変更なし） ---
+# --- PDFチェック用関数（詳細リスト出力版） ---
 def check_pdf(file, rules):
+    # 保護キーワード（これらが含まれる場合はスキップ）
+    keep_list = ["会員に成長する機会", "会員拡大運動", "正会員", "新入会員"]
+    
     results = []
     with pdfplumber.open(file) as pdf:
         for i, page in enumerate(pdf.pages):
             text = page.extract_text()
-            if text:
-                for wrong, right in rules.items():
-                    if wrong != right and wrong in text:
-                        matches = re.finditer(re.escape(wrong), text)
-                        for m in matches:
-                            start_check = max(0, m.start() - 30)
-                            end_check = min(len(text), m.end() + 30)
-                            context_full = text[start_check:end_check]
-                            is_protected = False
-                            keep_list = ["会員に成長する機会", "会員拡大運動", "正会員", "新入会員"]
-                            for kw in keep_list:
-                                if kw in context_full:
-                                    is_protected = True
-                                    break
-                            if not is_protected:
-                                results.append({
-                                    "ページ": i + 1,
-                                    "NGワード": wrong,
-                                    "修正案": right,
-                                    "周辺の文章": f"...{text[max(0, m.start()-10):min(len(text), m.end()+10)].replace('\n', ' ')}..."
-                                })
+            if not text:
+                continue
+            
+            # 各ルール（NGワード）ごとに1つずつチェック
+            for wrong, right in rules.items():
+                if wrong == right: continue
+                
+                # 文章内でNGワードを探す
+                if wrong in text:
+                    matches = re.finditer(re.escape(wrong), text)
+                    for m in matches:
+                        # 周辺の文章を取得（保護されているか確認するため）
+                        context_start = max(0, m.start() - 30)
+                        context_end = min(len(text), m.end() + 30)
+                        context_full = text[context_start:context_end]
+                        
+                        # 保護リストに含まれているか判定
+                        is_protected = any(kw in context_full for kw in keep_list)
+                        
+                        if not is_protected:
+                            results.append({
+                                "ページ": i + 1,
+                                "不適切な箇所": wrong,
+                                "修正後の名称": right,
+                                "周辺の文章": f"...{text[max(0, m.start()-12):min(len(text), m.end()+12)].replace('\n', ' ')}..."
+                            })
     return results
 
 # 4. メイン処理
@@ -186,12 +181,14 @@ if uploaded_files:
     for idx, file in enumerate(uploaded_files):
         ext = file.name.split('.')[-1].lower()
         if ext == "pdf":
-            with st.spinner(f"PDF {file.name} をスキャン中..."):
+            with st.spinner(f"PDF {file.name} を詳細スキャン中..."):
                 pdf_results = check_pdf(file, rules_dict)
                 st.subheader(f"📑 {file.name} のチェック結果")
                 if pdf_results:
-                    st.warning(f"以下の箇所が統一ルールに抵触している可能性があります。")
-                    st.table(pd.DataFrame(pdf_results))
+                    st.warning(f"以下の {len(pdf_results)} 箇所で統一ルールの確認が必要です。")
+                    # 表を表示
+                    df_res = pd.DataFrame(pdf_results)
+                    st.table(df_res)
                 else:
                     st.success("統一ルールに反する箇所は見つかりませんでした！")
         else:
