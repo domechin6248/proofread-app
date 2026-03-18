@@ -15,9 +15,14 @@ import pdfplumber
 st.set_page_config(page_title="川内JC 統一ルール修正ツール", page_icon="⚓", layout="wide")
 st.title("⚓ 2026年度 川内JC 統一ルール 修正システム")
 
-# 1. 色の設定
-color_option = st.selectbox("修正箇所の文字色（Word/Excel/PPT用）", ["赤", "青", "緑", "オレンジ"], index=0)
-color_map = {"赤": (255, 0, 0), "青": (0, 0, 255), "緑": (0, 128, 0), "オレンジ": (255, 165, 0)}
+# 1. 色の設定（オレンジを削除し、黒を追加）
+color_option = st.selectbox("修正箇所の文字色（Word/Excel/PPT用）", ["赤", "青", "緑", "黒"], index=0)
+color_map = {
+    "赤": (255, 0, 0), 
+    "青": (0, 0, 255), 
+    "緑": (0, 128, 0), 
+    "黒": (0, 0, 0)
+}
 selected_rgb = color_map[color_option]
 
 # 2. ルールの読み込み
@@ -38,10 +43,9 @@ rules_dict = load_rules()
 
 # 3. 修正・熟語保護ロジック
 def apply_rules_to_text(target_text, rules):
-    # 【絶対保護リスト】ここに書かれた言葉が含まれる場合、その部分は一切書き換えません
-    # 60周年の誓いやセレモニー関連のキーワードを短く設定して保護を確実にします
+    # 【絶対保護リスト】
     keep_words = [
-        "会員に成長する機会",  # ←ここを最優先で保護します
+        "会員に成長する機会", 
         "会員拡大運動", 
         "正会員", 
         "新入会員",
@@ -56,19 +60,16 @@ def apply_rules_to_text(target_text, rules):
         "志高きまち創造ビジョン"
     ]
     
-    # 1. 保護したい言葉を一時的に避難させる
     protected_text = target_text
     placeholders = {}
     for i, word in enumerate(keep_words):
         if word in protected_text:
-            # 特殊な記号に置き換えて、後の「会員→メンバー」ルールに反応させないようにする
             placeholder = f"__SAFE_WORD_{i}__"
             placeholders[placeholder] = word
             protected_text = protected_text.replace(word, placeholder)
 
     segments = [(protected_text, False)]
     
-    # 2. ルールの適用
     for wrong, right in rules.items():
         if wrong == right: continue
         new_segments = []
@@ -85,7 +86,6 @@ def apply_rules_to_text(target_text, rules):
                     new_segments.append((right, True))
         segments = new_segments
 
-    # 3. 避難させていた言葉を元に戻す
     final_segments = []
     for text, is_fixed in segments:
         if not is_fixed:
@@ -98,7 +98,7 @@ def apply_rules_to_text(target_text, rules):
             
     return final_segments
 
-# --- 各種ファイル修正用関数 ---
+# --- 各種ファイル修正用関数（太字設定を解除） ---
 def repair_docx(file, rules, rgb):
     doc = docx.Document(file)
     for para in doc.paragraphs:
@@ -109,7 +109,7 @@ def repair_docx(file, rules, rgb):
                 run = para.add_run(text)
                 if is_fixed:
                     run.font.color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
-                    run.bold = True
+                    run.bold = False  # 太字を解除
     out_io = BytesIO()
     doc.save(out_io)
     return out_io.getvalue()
@@ -124,7 +124,8 @@ def repair_xlsx(file, rules, rgb):
                     parts = apply_rules_to_text(cell.value, rules)
                     if any(p[1] for p in parts):
                         cell.value = "".join([p[0] for p in parts])
-                        cell.font = Font(color=hex_color, bold=True)
+                        # bold=False で太字を解除
+                        cell.font = Font(color=hex_color, bold=False)
     out_io = BytesIO()
     wb.save(out_io)
     return out_io.getvalue()
@@ -144,10 +145,12 @@ def repair_pptx(file, rules, rgb):
                             new_run.text = text
                             if is_fixed:
                                 new_run.font.color.rgb = PptxRGBColor(rgb[0], rgb[1], rgb[2])
+                                new_run.font.bold = False  # 太字を解除
     out_io = BytesIO()
     prs.save(out_io)
     return out_io.getvalue()
 
+# --- PDFチェック用関数（変更なし） ---
 def check_pdf(file, rules):
     results = []
     with pdfplumber.open(file) as pdf:
@@ -158,19 +161,15 @@ def check_pdf(file, rules):
                     if wrong != right and wrong in text:
                         matches = re.finditer(re.escape(wrong), text)
                         for m in matches:
-                            # 保護対象の文脈チェック
                             start_check = max(0, m.start() - 30)
                             end_check = min(len(text), m.end() + 30)
                             context_full = text[start_check:end_check]
-                            
                             is_protected = False
-                            # PDFチェック用保護キーワード
                             keep_list = ["会員に成長する機会", "会員拡大運動", "正会員", "新入会員"]
                             for kw in keep_list:
                                 if kw in context_full:
                                     is_protected = True
                                     break
-                            
                             if not is_protected:
                                 results.append({
                                     "ページ": i + 1,
