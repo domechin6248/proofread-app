@@ -127,7 +127,6 @@ def apply_rules_to_text(target_text, rules, for_reporting=False):
 # --- 網掛け（背景色）検知機能 ---
 def is_word_shaded(para):
     try:
-        # 1. 段落そのものに網掛けがあるか
         pPr = para._p.pPr
         if pPr is not None:
             shd = pPr.find(qn('w:shd'))
@@ -137,7 +136,6 @@ def is_word_shaded(para):
                 if val and val != 'clear': return True
                 if fill and fill not in ['auto', 'FFFFFF', 'clear']: return True
                 
-        # 2. 表のセルに背景色が塗られているか
         parent = para._p.getparent()
         if parent is not None and parent.tag.endswith('tc'):
             tcPr = parent.find(qn('w:tcPr'))
@@ -158,10 +156,7 @@ def repair_docx(file, rules, rgb):
     
     def process_paragraphs(paragraphs):
         for para in paragraphs:
-            # 網掛けされているか（大項目か）を判定
             is_shaded = is_word_shaded(para)
-            
-            # 元のフォントサイズと太字設定を記録（網掛け保護用）
             orig_bold, orig_size = None, None
             if para.runs and para.runs[0].font:
                 orig_bold = para.runs[0].font.bold
@@ -169,29 +164,23 @@ def repair_docx(file, rules, rgb):
 
             parts = apply_rules_to_text(para.text, rules, for_reporting=False)
             
-            # 修正・半角化があった場合、または網掛けではない（10.5ptにする必要がある）場合
             if any(p[2] for p in parts) or any(p[3] for p in parts) or not is_shaded:
                 para.text = ""
                 for orig, curr, is_fixed, is_alnum in parts:
                     run = para.add_run(curr)
-                    # 無条件でMS明朝
                     run.font.name = 'ＭＳ 明朝'
                     run._element.rPr.rFonts.set(qn('w:eastAsia'), 'ＭＳ 明朝')
                     
                     if is_shaded:
-                        # 網掛け部分：元の太字とサイズを完全に復元
                         if orig_size is not None: run.font.size = orig_size
                         if orig_bold is not None: run.font.bold = orig_bold
-                        # 修正箇所なら色だけ変える
                         if is_fixed: run.font.color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
                     else:
-                        # 通常部分：10.5ptに統一
                         run.font.size = Pt(10.5)
                         if is_fixed:
                             run.font.color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
                             run.bold = False
 
-    # 本文と表（テーブル）の中身を処理
     process_paragraphs(doc.paragraphs)
     for table in doc.tables:
         for row in table.rows:
@@ -209,7 +198,6 @@ def repair_xlsx(file, rules, rgb):
         for row in sheet.iter_rows():
             for cell in row:
                 if cell.value and isinstance(cell.value, str):
-                    # Excelでの背景色判定
                     is_shaded = False
                     if cell.fill and cell.fill.patternType and cell.fill.patternType != 'none':
                         if cell.fill.fgColor.rgb and cell.fill.fgColor.rgb not in ['00000000', 'FFFFFFFF', '00FFFFFF']:
@@ -223,10 +211,7 @@ def repair_xlsx(file, rules, rgb):
                     if any(p[2] for p in parts) or any(p[3] for p in parts) or not is_shaded:
                         cell.value = "".join([p[1] for p in parts])
                         is_fixed_present = any(p[2] for p in parts)
-                        
                         new_color = hex_color if is_fixed_present else (cell.font.color if cell.font else None)
-                        
-                        # 網掛けセルはサイズと太字を維持、通常は10.5ptで太字解除
                         new_size = orig_size if is_shaded else 10.5
                         new_bold = orig_bold if is_shaded else False
                         
@@ -318,4 +303,6 @@ if uploaded_files:
                 if ext == "docx": data = repair_docx(file, rules_dict, selected_rgb)
                 elif ext == "xlsx": data = repair_xlsx(file, rules_dict, selected_rgb)
                 elif ext == "pptx": data = repair_pptx(file, rules_dict, selected_rgb)
-                st.download_button(label=f"📥 修正済みの {file.name} を保存", data=data, file_name=f"【修正済】{file.name}", key=f"dl_btn_{idx}")
+                
+                # ★ここを変更しました：元のファイル名をそのまま使用
+                st.download_button(label=f"📥 修正済みの {file.name} を保存", data=data, file_name=file.name, key=f"dl_btn_{idx}")
