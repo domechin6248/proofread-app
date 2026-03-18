@@ -29,7 +29,6 @@ def load_rules():
         except:
             df = pd.read_csv('rules.csv', encoding='shift-jis')
         
-        # 文字数が長い順にソート（「新入会員」を「会員」より先に処理するため）
         df['len'] = df['類義語'].astype(str).str.len()
         df = df.sort_values('len', ascending=False)
         return dict(zip(df['類義語'].astype(str), df['統一語句'].astype(str)))
@@ -39,20 +38,33 @@ rules_dict = load_rules()
 
 # 3. 修正・熟語保護ロジック
 def apply_rules_to_text(target_text, rules):
-    # 【保護リスト】ここに書いた言葉は、勝手に書き換えられません
-    keep_words = ["会員拡大運動", "正会員", "新入会員"]
+    # 【絶対保護リスト】ここに書かれた定型文や熟語は、ルール適用から除外されます
+    keep_words = [
+        "会員拡大運動", "正会員", "新入会員",
+        # 60周年への誓い
+        "会員に成長する機会を提供し、誇りを持てる持続可能な組織運営を行います。",
+        "国内だけでなく国際的な視野を持ち、社会貢献を行える組織を目指します。",
+        # JC宣言・綱領関連
+        "日本の青年会議所は", "希望をもたらす変革の起点として", "輝く個性が調和する未来を描き",
+        "社会の課題を解決することで", "持続可能な地域を創ることを誓う",
+        "われわれ JAYCEE は", "社会的・国家的・国際的な責任を自覚し",
+        # 志高きビジョン関連
+        "市民がまちづくりへの当事者意識を持ち", "多様な市民が共生できるまちを創造します",
+        "地域特有の個性を活かし"
+    ]
     
     # 1. 保護したい言葉を一時的に避難させる
     protected_text = target_text
     placeholders = {}
     for i, word in enumerate(keep_words):
-        placeholder = f"__KEEP_{i}__"
-        placeholders[placeholder] = word
-        protected_text = protected_text.replace(word, placeholder)
+        if word in protected_text:
+            placeholder = f"__KEEP_WORD_{i}__"
+            placeholders[placeholder] = word
+            protected_text = protected_text.replace(word, placeholder)
 
     segments = [(protected_text, False)]
     
-    # 2. ルールの適用（NGワードを統一語句に置換）
+    # 2. ルールの適用
     for wrong, right in rules.items():
         if wrong == right: continue
         new_segments = []
@@ -82,7 +94,7 @@ def apply_rules_to_text(target_text, rules):
             
     return final_segments
 
-# --- 各種ファイル修正用関数 ---
+# --- 各種ファイル修正用関数（中略） ---
 def repair_docx(file, rules, rgb):
     doc = docx.Document(file)
     for para in doc.paragraphs:
@@ -132,7 +144,6 @@ def repair_pptx(file, rules, rgb):
     prs.save(out_io)
     return out_io.getvalue()
 
-# --- PDFチェック用関数 ---
 def check_pdf(file, rules):
     results = []
     with pdfplumber.open(file) as pdf:
@@ -143,15 +154,26 @@ def check_pdf(file, rules):
                     if wrong != right and wrong in text:
                         matches = re.finditer(re.escape(wrong), text)
                         for m in matches:
-                            start = max(0, m.start() - 10)
-                            end = min(len(text), m.end() + 10)
-                            context = text[start:end].replace("\n", " ")
-                            results.append({
-                                "ページ": i + 1,
-                                "NGワード": wrong,
-                                "修正案": right,
-                                "周辺の文章": f"...{context}..."
-                            })
+                            # 前後の文脈を確認し、保護対象が含まれていればスキップ
+                            start = max(0, m.start() - 50)
+                            end = min(len(text), m.end() + 50)
+                            context_full = text[start:end]
+                            
+                            # apply_rules_to_textと同じ保護ロジックを簡易適用
+                            is_protected = False
+                            keep_list = ["会員拡大運動", "正会員", "新入会員", "会員に成長する機会を提供し"]
+                            for kw in keep_list:
+                                if kw in context_full:
+                                    is_protected = True
+                                    break
+                            
+                            if not is_protected:
+                                results.append({
+                                    "ページ": i + 1,
+                                    "NGワード": wrong,
+                                    "修正案": right,
+                                    "周辺の文章": f"...{text[max(0, m.start()-10):min(len(text), m.end()+10)].replace('\n', ' ')}..."
+                                })
     return results
 
 # 4. メイン処理
@@ -160,7 +182,6 @@ uploaded_files = st.file_uploader("ファイルをアップロード (Word, Exce
 if uploaded_files:
     for idx, file in enumerate(uploaded_files):
         ext = file.name.split('.')[-1].lower()
-        
         if ext == "pdf":
             with st.spinner(f"PDF {file.name} をスキャン中..."):
                 pdf_results = check_pdf(file, rules_dict)
@@ -170,16 +191,9 @@ if uploaded_files:
                     st.table(pd.DataFrame(pdf_results))
                 else:
                     st.success("統一ルールに反する箇所は見つかりませんでした！")
-        
         else:
             with st.spinner(f"{file.name} を処理中..."):
                 if ext == "docx": data = repair_docx(file, rules_dict, selected_rgb)
                 elif ext == "xlsx": data = repair_xlsx(file, rules_dict, selected_rgb)
                 elif ext == "pptx": data = repair_pptx(file, rules_dict, selected_rgb)
-                
-                st.download_button(
-                    label=f"📥 修正済みの {file.name} を保存", 
-                    data=data, 
-                    file_name=f"【修正済】{file.name}",
-                    key=f"dl_btn_{file.name}_{idx}"
-                )
+                st.download_button(label=f"📥 修正済みの {file.name} を保存", data=data, file_name=f"【修正済】{file.name}", key=f"dl_btn_{file.name}_{idx}")
