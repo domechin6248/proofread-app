@@ -38,19 +38,22 @@ rules_dict = load_rules()
 
 # 3. 修正・熟語保護ロジック
 def apply_rules_to_text(target_text, rules):
-    # 【絶対保護リスト】ここに書かれた定型文や熟語は、ルール適用から除外されます
+    # 【絶対保護リスト】ここに書かれた言葉が含まれる場合、その部分は一切書き換えません
+    # 60周年の誓いやセレモニー関連のキーワードを短く設定して保護を確実にします
     keep_words = [
-        "会員拡大運動", "正会員", "新入会員",
-        # 60周年への誓い
-        "会員に成長する機会を提供し、誇りを持てる持続可能な組織運営を行います。",
-        "国内だけでなく国際的な視野を持ち、社会貢献を行える組織を目指します。",
-        # JC宣言・綱領関連
-        "日本の青年会議所は", "希望をもたらす変革の起点として", "輝く個性が調和する未来を描き",
-        "社会の課題を解決することで", "持続可能な地域を創ることを誓う",
-        "われわれ JAYCEE は", "社会的・国家的・国際的な責任を自覚し",
-        # 志高きビジョン関連
-        "市民がまちづくりへの当事者意識を持ち", "多様な市民が共生できるまちを創造します",
-        "地域特有の個性を活かし"
+        "会員に成長する機会",  # ←ここを最優先で保護します
+        "会員拡大運動", 
+        "正会員", 
+        "新入会員",
+        "日本の青年会議所は", 
+        "希望をもたらす変革の起点として", 
+        "輝く個性が調和する未来を描き",
+        "社会の課題を解決することで", 
+        "持続可能な地域を創ることを誓う",
+        "われわれ JAYCEE は", 
+        "志高き組織ビジョン",
+        "志高き人材育成ビジョン",
+        "志高きまち創造ビジョン"
     ]
     
     # 1. 保護したい言葉を一時的に避難させる
@@ -58,7 +61,8 @@ def apply_rules_to_text(target_text, rules):
     placeholders = {}
     for i, word in enumerate(keep_words):
         if word in protected_text:
-            placeholder = f"__KEEP_WORD_{i}__"
+            # 特殊な記号に置き換えて、後の「会員→メンバー」ルールに反応させないようにする
+            placeholder = f"__SAFE_WORD_{i}__"
             placeholders[placeholder] = word
             protected_text = protected_text.replace(word, placeholder)
 
@@ -94,7 +98,7 @@ def apply_rules_to_text(target_text, rules):
             
     return final_segments
 
-# --- 各種ファイル修正用関数（中略） ---
+# --- 各種ファイル修正用関数 ---
 def repair_docx(file, rules, rgb):
     doc = docx.Document(file)
     for para in doc.paragraphs:
@@ -154,14 +158,14 @@ def check_pdf(file, rules):
                     if wrong != right and wrong in text:
                         matches = re.finditer(re.escape(wrong), text)
                         for m in matches:
-                            # 前後の文脈を確認し、保護対象が含まれていればスキップ
-                            start = max(0, m.start() - 50)
-                            end = min(len(text), m.end() + 50)
-                            context_full = text[start:end]
+                            # 保護対象の文脈チェック
+                            start_check = max(0, m.start() - 30)
+                            end_check = min(len(text), m.end() + 30)
+                            context_full = text[start_check:end_check]
                             
-                            # apply_rules_to_textと同じ保護ロジックを簡易適用
                             is_protected = False
-                            keep_list = ["会員拡大運動", "正会員", "新入会員", "会員に成長する機会を提供し"]
+                            # PDFチェック用保護キーワード
+                            keep_list = ["会員に成長する機会", "会員拡大運動", "正会員", "新入会員"]
                             for kw in keep_list:
                                 if kw in context_full:
                                     is_protected = True
