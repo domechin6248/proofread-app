@@ -24,12 +24,12 @@ selected_rgb = color_map[color_option]
 @st.cache_data
 def load_rules():
     if os.path.exists('rules.csv'):
-        # UTF-8 または Shift-JIS で読み込み
         try:
             df = pd.read_csv('rules.csv', encoding='utf-8')
         except:
             df = pd.read_csv('rules.csv', encoding='shift-jis')
         
+        # 文字数が長い順にソート（「新入会員」を「会員」より先に処理するため）
         df['len'] = df['類義語'].astype(str).str.len()
         df = df.sort_values('len', ascending=False)
         return dict(zip(df['類義語'].astype(str), df['統一語句'].astype(str)))
@@ -37,9 +37,22 @@ def load_rules():
 
 rules_dict = load_rules()
 
-# 3. 修正ロジック
+# 3. 修正・熟語保護ロジック
 def apply_rules_to_text(target_text, rules):
-    segments = [(target_text, False)]
+    # 【保護リスト】ここに書いた言葉は、勝手に書き換えられません
+    keep_words = ["会員拡大運動", "正会員", "新入会員"]
+    
+    # 1. 保護したい言葉を一時的に避難させる
+    protected_text = target_text
+    placeholders = {}
+    for i, word in enumerate(keep_words):
+        placeholder = f"__KEEP_{i}__"
+        placeholders[placeholder] = word
+        protected_text = protected_text.replace(word, placeholder)
+
+    segments = [(protected_text, False)]
+    
+    # 2. ルールの適用（NGワードを統一語句に置換）
     for wrong, right in rules.items():
         if wrong == right: continue
         new_segments = []
@@ -48,15 +61,26 @@ def apply_rules_to_text(target_text, rules):
                 new_segments.append((text, already_fixed))
                 continue
             
-            # 分割して置換
             parts = text.split(wrong)
-            for i, part in enumerate(parts):
+            for j, part in enumerate(parts):
                 if part != "":
                     new_segments.append((part, False))
-                if i < len(parts) - 1:
+                if j < len(parts) - 1:
                     new_segments.append((right, True))
         segments = new_segments
-    return segments
+
+    # 3. 避難させていた言葉を元に戻す
+    final_segments = []
+    for text, is_fixed in segments:
+        if not is_fixed:
+            temp_text = text
+            for placeholder, original in placeholders.items():
+                temp_text = temp_text.replace(placeholder, original)
+            final_segments.append((temp_text, False))
+        else:
+            final_segments.append((text, is_fixed))
+            
+    return final_segments
 
 # --- 各種ファイル修正用関数 ---
 def repair_docx(file, rules, rgb):
@@ -117,7 +141,6 @@ def check_pdf(file, rules):
             if text:
                 for wrong, right in rules.items():
                     if wrong != right and wrong in text:
-                        # 見つかった箇所を抽出
                         matches = re.finditer(re.escape(wrong), text)
                         for m in matches:
                             start = max(0, m.start() - 10)
