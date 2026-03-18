@@ -29,6 +29,7 @@ def load_rules():
         except:
             df = pd.read_csv('rules.csv', encoding='shift-jis')
         
+        # 文字数順（長い順）に並び替えて、短い単語の誤判定を防ぐ
         df['len'] = df['類義語'].astype(str).str.len()
         df = df.sort_values('len', ascending=False)
         return dict(zip(df['類義語'].astype(str), df['統一語句'].astype(str)))
@@ -47,11 +48,12 @@ def apply_rules_to_text(target_text, rules):
         "志高き組織ビジョン", "志高き人材育成ビジョン", "志高きまち創造ビジョン"
     ]
     
+    # 特殊記号を使って一時的に避難
     protected_text = target_text
     placeholders = {}
     for i, word in enumerate(keep_words):
         if word in protected_text:
-            placeholder = f"__SAFE_{i}__"
+            placeholder = f"__SAFE_MARK_{i}__"
             placeholders[placeholder] = word
             protected_text = protected_text.replace(word, placeholder)
 
@@ -69,6 +71,7 @@ def apply_rules_to_text(target_text, rules):
                 if j < len(parts) - 1: new_segments.append((right, True))
         segments = new_segments
 
+    # 避難させた言葉を戻す
     final_segments = []
     for text, is_fixed in segments:
         if not is_fixed:
@@ -80,7 +83,7 @@ def apply_rules_to_text(target_text, rules):
             final_segments.append((text, is_fixed))
     return final_segments
 
-# --- 各種ファイル修正用関数 ---
+# --- ファイル修正用関数（Word/Excel/PPT） ---
 def repair_docx(file, rules, rgb):
     doc = docx.Document(file)
     for para in doc.paragraphs:
@@ -131,43 +134,46 @@ def repair_pptx(file, rules, rgb):
     prs.save(out_io)
     return out_io.getvalue()
 
-# --- PDFチェック用関数（全ヒット抽出版） ---
+# --- PDFチェック用関数（高精度解析版） ---
 def check_pdf(file, rules):
     keep_list = ["会員に成長する機会", "会員拡大運動", "正会員", "新入会員"]
     results = []
     
     with pdfplumber.open(file) as pdf:
         for i, page in enumerate(pdf.pages):
-            text = page.extract_text()
+            # x_tolerance（文字の間隔の許容範囲）を設定して、バラバラの文字を結合する
+            text = page.extract_text(x_tolerance=2, y_tolerance=2)
             if not text: continue
             
-            # 各ルールを一つずつ確実にスキャン
+            # 改行を一旦スペースに置換して、文章のつながりを良くする
+            clean_text = text.replace('\n', ' ')
+            
             for wrong, right in rules.items():
                 if wrong == right or not wrong: continue
                 
-                # 正規表現を使用して、すべての出現箇所を取得
-                # re.escapeで特殊文字を無効化し、すべて検索
-                matches = list(re.finditer(re.escape(wrong), text))
+                # 文字が含まれているかチェック（正規表現で全検索）
+                matches = list(re.finditer(re.escape(wrong), clean_text))
                 
                 for m in matches:
-                    # ヒットした場所の前後30文字を確認（保護ワードチェック用）
-                    check_start = max(0, m.start() - 30)
-                    check_end = min(len(text), m.end() + 30)
-                    context_full = text[check_start:check_end]
+                    # 前後の文脈を確認
+                    c_start = max(0, m.start() - 40)
+                    c_end = min(len(clean_text), m.end() + 40)
+                    context_window = clean_text[c_start:c_end]
                     
-                    # 保護対象（会員拡大運動など）の中に含まれている場合は無視
-                    is_protected = any(kw in context_full for kw in keep_list)
+                    # 保護ワードが含まれている場合は除外
+                    is_protected = any(kw in context_window for kw in keep_list)
                     
                     if not is_protected:
                         results.append({
                             "ページ": i + 1,
                             "不適切な箇所": wrong,
                             "修正後の名称": right,
-                            "周辺の文章": f"...{text[max(0, m.start()-12):min(len(text), m.end()+12)].replace('\n', ' ')}..."
+                            "周辺の文章": f"...{clean_text[max(0, m.start()-15):min(len(clean_text), m.end()+15)]}..."
                         })
     
-    # ページ番号順、その中で見つかった順に並び替え
-    return sorted(results, key=lambda x: x['ページ'])
+    # ページ順にソートして、重複を削除
+    unique_results = [dict(t) for t in {tuple(d.items()) for d in results}]
+    return sorted(unique_results, key=lambda x: (x['ページ'], x['不適切な箇所']))
 
 # 4. メイン処理
 uploaded_files = st.file_uploader("ファイルをアップロード (Word, Excel, PPT, PDF)", type=["docx", "xlsx", "pptx", "pdf"], accept_multiple_files=True)
@@ -176,11 +182,11 @@ if uploaded_files:
     for idx, file in enumerate(uploaded_files):
         ext = file.name.split('.')[-1].lower()
         if ext == "pdf":
-            with st.spinner(f"PDF {file.name} を詳細スキャン中..."):
+            with st.spinner(f"PDF {file.name} を高精度スキャン中..."):
                 pdf_results = check_pdf(file, rules_dict)
                 st.subheader(f"📑 {file.name} のチェック結果")
                 if pdf_results:
-                    st.warning(f"以下の {len(pdf_results)} 箇所で修正が推奨されます。")
+                    st.warning(f"以下の {len(pdf_results)} 箇所で統一ルールの確認が必要です。")
                     st.table(pd.DataFrame(pdf_results))
                 else:
                     st.success("統一ルールに反する箇所は見つかりませんでした！")
