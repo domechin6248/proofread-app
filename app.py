@@ -28,8 +28,6 @@ def load_rules():
             df = pd.read_csv('rules.csv', encoding='utf-8')
         except:
             df = pd.read_csv('rules.csv', encoding='shift-jis')
-        
-        # 文字数順（長い順）に並び替えて、短い単語の誤判定を防ぐ
         df['len'] = df['類義語'].astype(str).str.len()
         df = df.sort_values('len', ascending=False)
         return dict(zip(df['類義語'].astype(str), df['統一語句'].astype(str)))
@@ -37,23 +35,14 @@ def load_rules():
 
 rules_dict = load_rules()
 
-# 3. 修正・熟語保護ロジック
+# 3. 修正・熟語保護ロジック (Word/Excel/PPT用)
 def apply_rules_to_text(target_text, rules):
-    # 【絶対保護リスト】
-    keep_words = [
-        "会員に成長する機会", "会員拡大運動", "正会員", "新入会員",
-        "日本の青年会議所は", "希望をもたらす変革の起点として", 
-        "輝く個性が調和する未来を描き", "社会の課題を解決することで", 
-        "持続可能な地域を創ることを誓う", "われわれ JAYCEE は", 
-        "志高き組織ビジョン", "志高き人材育成ビジョン", "志高きまち創造ビジョン"
-    ]
-    
-    # 特殊記号を使って一時的に避難
+    keep_words = ["会員に成長する機会", "会員拡大運動", "正会員", "新入会員", "日本の青年会議所は", "志高き組織ビジョン"]
     protected_text = target_text
     placeholders = {}
     for i, word in enumerate(keep_words):
         if word in protected_text:
-            placeholder = f"__SAFE_MARK_{i}__"
+            placeholder = f"__SAFE_{i}__"
             placeholders[placeholder] = word
             protected_text = protected_text.replace(word, placeholder)
 
@@ -71,7 +60,6 @@ def apply_rules_to_text(target_text, rules):
                 if j < len(parts) - 1: new_segments.append((right, True))
         segments = new_segments
 
-    # 避難させた言葉を戻す
     final_segments = []
     for text, is_fixed in segments:
         if not is_fixed:
@@ -83,7 +71,7 @@ def apply_rules_to_text(target_text, rules):
             final_segments.append((text, is_fixed))
     return final_segments
 
-# --- ファイル修正用関数（Word/Excel/PPT） ---
+# --- 修正用関数 (Word/Excel/PPT) ---
 def repair_docx(file, rules, rgb):
     doc = docx.Document(file)
     for para in doc.paragraphs:
@@ -134,46 +122,48 @@ def repair_pptx(file, rules, rgb):
     prs.save(out_io)
     return out_io.getvalue()
 
-# --- PDFチェック用関数（高精度解析版） ---
+# --- PDFチェック用関数 (新・1文字解析ロジック) ---
 def check_pdf(file, rules):
     keep_list = ["会員に成長する機会", "会員拡大運動", "正会員", "新入会員"]
     results = []
     
     with pdfplumber.open(file) as pdf:
         for i, page in enumerate(pdf.pages):
-            # x_tolerance（文字の間隔の許容範囲）を設定して、バラバラの文字を結合する
-            text = page.extract_text(x_tolerance=2, y_tolerance=2)
-            if not text: continue
+            # 文字情報を座標込みで取得
+            chars = page.chars
+            if not chars: continue
             
-            # 改行を一旦スペースに置換して、文章のつながりを良くする
-            clean_text = text.replace('\n', ' ')
+            # ページ内の全文字を一つの文字列にする（空白や改行を極力排除）
+            full_text = "".join([c["text"] for c in chars])
             
+            # 各ルールをチェック
             for wrong, right in rules.items():
                 if wrong == right or not wrong: continue
                 
-                # 文字が含まれているかチェック（正規表現で全検索）
-                matches = list(re.finditer(re.escape(wrong), clean_text))
+                # 日本語の曖昧なスペースや改行に強い正規表現検索
+                # 文字の間に0個以上の空白文字を許容するパターン
+                pattern = " *".join([re.escape(char) for char in wrong])
+                matches = list(re.finditer(pattern, full_text))
                 
                 for m in matches:
-                    # 前後の文脈を確認
-                    c_start = max(0, m.start() - 40)
-                    c_end = min(len(clean_text), m.end() + 40)
-                    context_window = clean_text[c_start:c_end]
+                    # 前後の文脈を確認（保護ワードチェック）
+                    start_idx = max(0, m.start() - 40)
+                    end_idx = min(len(full_text), m.end() + 40)
+                    context = full_text[start_idx:end_idx]
                     
-                    # 保護ワードが含まれている場合は除外
-                    is_protected = any(kw in context_window for kw in keep_list)
+                    is_protected = any(kw in context for kw in keep_list)
                     
                     if not is_protected:
                         results.append({
                             "ページ": i + 1,
                             "不適切な箇所": wrong,
                             "修正後の名称": right,
-                            "周辺の文章": f"...{clean_text[max(0, m.start()-15):min(len(clean_text), m.end()+15)]}..."
+                            "周辺の文章": f"...{full_text[max(0, m.start()-10):min(len(full_text), m.end()+10)]}..."
                         })
     
-    # ページ順にソートして、重複を削除
-    unique_results = [dict(t) for t in {tuple(d.items()) for d in results}]
-    return sorted(unique_results, key=lambda x: (x['ページ'], x['不適切な箇所']))
+    # 重複を排除してソート
+    df = pd.DataFrame(results).drop_duplicates() if results else pd.DataFrame()
+    return df.to_dict('records') if not df.empty else []
 
 # 4. メイン処理
 uploaded_files = st.file_uploader("ファイルをアップロード (Word, Excel, PPT, PDF)", type=["docx", "xlsx", "pptx", "pdf"], accept_multiple_files=True)
@@ -182,11 +172,11 @@ if uploaded_files:
     for idx, file in enumerate(uploaded_files):
         ext = file.name.split('.')[-1].lower()
         if ext == "pdf":
-            with st.spinner(f"PDF {file.name} を高精度スキャン中..."):
+            with st.spinner(f"PDF {file.name} を解析中..."):
                 pdf_results = check_pdf(file, rules_dict)
                 st.subheader(f"📑 {file.name} のチェック結果")
                 if pdf_results:
-                    st.warning(f"以下の {len(pdf_results)} 箇所で統一ルールの確認が必要です。")
+                    st.warning(f"以下の {len(pdf_results)} 箇所で修正が推奨されます。")
                     st.table(pd.DataFrame(pdf_results))
                 else:
                     st.success("統一ルールに反する箇所は見つかりませんでした！")
@@ -195,4 +185,4 @@ if uploaded_files:
                 if ext == "docx": data = repair_docx(file, rules_dict, selected_rgb)
                 elif ext == "xlsx": data = repair_xlsx(file, rules_dict, selected_rgb)
                 elif ext == "pptx": data = repair_pptx(file, rules_dict, selected_rgb)
-                st.download_button(label=f"📥 修正済みの {file.name} を保存", data=data, file_name=f"【修正済】{file.name}", key=f"dl_btn_{file.name}_{idx}")
+                st.download_button(label=f"📥 修正済みの {file.name} を保存", data=data, file_name=f"【修正済】{file.name}", key=f"dl_btn_{idx}")
