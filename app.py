@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import docx
 from docx.shared import RGBColor
-from docx.oxml.ns import qn  # Wordのフォント設定用に追加
+from docx.oxml.ns import qn  # Wordのフォント設定用
 import openpyxl
 from openpyxl.styles import Font
 from pptx import Presentation
@@ -61,14 +61,12 @@ def apply_rules_to_text(target_text, rules, for_reporting=False):
     protected_text = target_text
     placeholders = {}
     
-    # 【ステップ1】保護対象を避難させる（英数字を含まない特殊な文字列を使用）
     for i, word in enumerate(keep_words):
         if word in protected_text:
             placeholder = f"《《保{i:04d}護》》"
             placeholders[placeholder] = word
             protected_text = protected_text.replace(word, placeholder)
 
-    # 【ステップ2】統一ルールの適用
     segments = [(protected_text, protected_text, False)]
     for wrong, right in rules.items():
         if wrong == right or not wrong: continue
@@ -85,7 +83,6 @@ def apply_rules_to_text(target_text, rules, for_reporting=False):
                     new_segments.append((str(wrong), str(right), True))
         segments = new_segments
 
-    # 【ステップ3】保護していた言葉を元に戻す
     restored_segments = []
     for orig, curr, is_fixed in segments:
         temp_orig = orig
@@ -96,40 +93,33 @@ def apply_rules_to_text(target_text, rules, for_reporting=False):
                 temp_curr = temp_curr.replace(placeholder, original_word)
         restored_segments.append((temp_orig, temp_curr, is_fixed))
 
-    # 【ステップ4】英数字の半角化＆フォントフラグ付け（記号は無視）
+    # 全角英数字を半角にする（記号は無視）
     ZEN_ALNUM = "ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ０１２３４５６７８９"
     HAN_ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
     ZEN2HAN_MAP = str.maketrans(ZEN_ALNUM, HAN_ALNUM)
     
-    # 記号を含まない「純粋な英数字」のみを抽出する正規表現
     alnum_pattern = r'([A-Za-z0-9Ａ-Ｚａ-ｚ０-９]+)'
     final_segments = []
     
     for orig, curr, is_fixed in restored_segments:
         if for_reporting and is_fixed:
-            # PDFレポート用：既にルールで修正済みの場合はこれ以上分割しない
             def replacer(match):
                 return match.group(1).translate(ZEN2HAN_MAP)
             new_curr = re.sub(alnum_pattern, replacer, curr)
             has_alnum = bool(re.search(alnum_pattern, new_curr))
             final_segments.append((orig, new_curr, True, has_alnum))
         else:
-            # 英数字ブロックとそれ以外に分割
             parts = re.split(alnum_pattern, curr)
             for i, part in enumerate(parts):
                 if not part: continue
                 if i % 2 == 1:
-                    # 英数字ブロック：半角に変換
                     half_part = part.translate(ZEN2HAN_MAP)
                     was_converted = (half_part != part)
-                    
                     if for_reporting:
-                        part_orig = part
-                        final_segments.append((part_orig, half_part, was_converted, True))
+                        final_segments.append((part, half_part, was_converted, True))
                     else:
                         final_segments.append((orig, half_part, is_fixed or was_converted, True))
                 else:
-                    # 日本語や記号ブロック：そのまま
                     if for_reporting:
                         final_segments.append((part, part, False, False))
                     else:
@@ -140,19 +130,46 @@ def apply_rules_to_text(target_text, rules, for_reporting=False):
 # --- ファイル修正用関数 ---
 def repair_docx(file, rules, rgb):
     doc = docx.Document(file)
-    for para in doc.paragraphs:
-        parts = apply_rules_to_text(para.text, rules, for_reporting=False)
-        if any(p[2] for p in parts) or any(p[3] for p in parts):
-            para.text = ""
-            for orig, curr, is_fixed, is_alnum in parts:
-                run = para.add_run(curr)
-                if is_alnum:
-                    # 英数字にはMS明朝を適用
+    
+    # Word全体のデフォルトフォントをMS明朝に
+    if 'Normal' in doc.styles:
+        style = doc.styles['Normal']
+        if style.font:
+            style.font.name = 'ＭＳ 明朝'
+            if style.element.rPr is not None:
+                style.element.rPr.rFonts.set(qn('w:eastAsia'), 'ＭＳ 明朝')
+
+    # 段落処理の共通関数
+    def process_paragraphs(paragraphs):
+        for para in paragraphs:
+            parts = apply_rules_to_text(para.text, rules, for_reporting=False)
+            
+            # 修正や半角化があった場合、新しく書き直して全部MS明朝
+            if any(p[2] for p in parts) or any(p[3] for p in parts):
+                para.text = ""
+                for orig, curr, is_fixed, is_alnum in parts:
+                    run = para.add_run(curr)
+                    # 【Word限定】英数字や日本語に関係なくすべてMS明朝
                     run.font.name = 'ＭＳ 明朝'
                     run._element.rPr.rFonts.set(qn('w:eastAsia'), 'ＭＳ 明朝')
-                if is_fixed:
-                    run.font.color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
-                    run.bold = False
+                    if is_fixed:
+                        run.font.color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
+                        run.bold = False
+            else:
+                # 修正がない部分も、既存の文字を強制的にMS明朝に変える
+                for run in para.runs:
+                    run.font.name = 'ＭＳ 明朝'
+                    run._element.rPr.rFonts.set(qn('w:eastAsia'), 'ＭＳ 明朝')
+
+    # 本文の処理
+    process_paragraphs(doc.paragraphs)
+    
+    # 【追加機能】表（テーブル）の中身も処理
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                process_paragraphs(cell.paragraphs)
+
     out_io = BytesIO()
     doc.save(out_io)
     return out_io.getvalue()
@@ -167,7 +184,6 @@ def repair_xlsx(file, rules, rgb):
                     parts = apply_rules_to_text(cell.value, rules, for_reporting=False)
                     if any(p[2] for p in parts) or any(p[3] for p in parts):
                         cell.value = "".join([p[1] for p in parts])
-                        
                         is_alnum_present = any(p[3] for p in parts)
                         is_fixed_present = any(p[2] for p in parts)
                         
@@ -194,7 +210,6 @@ def repair_pptx(file, rules, rgb):
                             new_run = paragraph.add_run()
                             new_run.text = curr
                             if is_alnum:
-                                # 英数字にはMS明朝を適用
                                 new_run.font.name = 'ＭＳ 明朝'
                             if is_fixed:
                                 new_run.font.color.rgb = PptxRGBColor(rgb[0], rgb[1], rgb[2])
