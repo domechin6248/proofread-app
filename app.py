@@ -20,7 +20,7 @@ color_option = st.selectbox("修正箇所の文字色（Word/Excel/PPT用）", [
 color_map = {"赤": (255, 0, 0), "青": (0, 0, 255), "緑": (0, 128, 0), "黒": (0, 0, 0)}
 selected_rgb = color_map[color_option]
 
-# 2. ルールの読み込み
+# 2. ルールの読み込み（空白文字等のエラー対策を追加）
 @st.cache_data
 def load_rules():
     if os.path.exists('rules.csv'):
@@ -28,16 +28,29 @@ def load_rules():
             df = pd.read_csv('rules.csv', encoding='utf-8')
         except:
             df = pd.read_csv('rules.csv', encoding='shift-jis')
-        df['len'] = df['類義語'].astype(str).str.len()
+        
+        # CSV内の空行や無駄なスペースを除去して精度を高める
+        df = df.dropna(subset=['類義語', '統一語句'])
+        df['類義語'] = df['類義語'].astype(str).str.strip()
+        df['統一語句'] = df['統一語句'].astype(str).str.strip()
+        
+        df['len'] = df['類義語'].str.len()
         df = df.sort_values('len', ascending=False)
-        return dict(zip(df['類義語'].astype(str), df['統一語句'].astype(str)))
+        return dict(zip(df['類義語'], df['統一語句']))
     return {}
 
 rules_dict = load_rules()
 
 # 3. 修正・熟語保護ロジック (Word/Excel/PPT用)
 def apply_rules_to_text(target_text, rules):
-    keep_words = ["会員に成長する機会", "会員拡大運動", "正会員", "新入会員", "日本の青年会議所は", "志高き組織ビジョン"]
+    keep_words = [
+        "会員に成長する機会", "会員拡大運動", "正会員", "新入会員",
+        "日本の青年会議所は", "希望をもたらす変革の起点として", 
+        "輝く個性が調和する未来を描き", "社会の課題を解決することで", 
+        "持続可能な地域を創ることを誓う", "われわれ JAYCEE は", "われわれJAYCEEは",
+        "志高き組織ビジョン", "志高き人材育成ビジョン", "志高きまち創造ビジョン"
+    ]
+    
     protected_text = target_text
     placeholders = {}
     for i, word in enumerate(keep_words):
@@ -48,7 +61,7 @@ def apply_rules_to_text(target_text, rules):
 
     segments = [(protected_text, False)]
     for wrong, right in rules.items():
-        if wrong == right: continue
+        if wrong == right or not wrong: continue
         new_segments = []
         for text, already_fixed in segments:
             if already_fixed or wrong not in text:
@@ -71,7 +84,7 @@ def apply_rules_to_text(target_text, rules):
             final_segments.append((text, is_fixed))
     return final_segments
 
-# --- 修正用関数 (Word/Excel/PPT) ---
+# --- ファイル修正用関数 ---
 def repair_docx(file, rules, rgb):
     doc = docx.Document(file)
     for para in doc.paragraphs:
@@ -122,48 +135,63 @@ def repair_pptx(file, rules, rgb):
     prs.save(out_io)
     return out_io.getvalue()
 
-# --- PDFチェック用関数 (新・1文字解析ロジック) ---
+# --- PDFチェック用関数 (新・厳密座標スキャン版) ---
 def check_pdf(file, rules):
-    keep_list = ["会員に成長する機会", "会員拡大運動", "正会員", "新入会員"]
-    results = []
+    keep_list = [
+        "会員に成長する機会", "会員拡大運動", "正会員", "新入会員",
+        "日本の青年会議所は", "希望をもたらす変革の起点として", 
+        "輝く個性が調和する未来を描き", "社会の課題を解決することで", 
+        "持続可能な地域を創ることを誓う", "われわれ JAYCEE は", "われわれJAYCEEは",
+        "志高き組織ビジョン", "志高き人材育成ビジョン", "志高きまち創造ビジョン"
+    ]
     
+    results = []
     with pdfplumber.open(file) as pdf:
         for i, page in enumerate(pdf.pages):
-            # 文字情報を座標込みで取得
-            chars = page.chars
-            if not chars: continue
+            text = page.extract_text(x_tolerance=2, y_tolerance=2)
+            if not text: continue
             
-            # ページ内の全文字を一つの文字列にする（空白や改行を極力排除）
-            full_text = "".join([c["text"] for c in chars])
+            # 1. 検索用にPDFの改行や空白をすべて消して「純粋な文字列」にする
+            clean_text = re.sub(r'\s+', '', text)
             
-            # 各ルールをチェック
+            # 2. 保護対象ワードの位置（何文字目〜何文字目か）を事前に正確に記憶する
+            protected_spans = []
+            for kw in keep_list:
+                clean_kw = re.sub(r'\s+', '', kw)
+                for m in re.finditer(re.escape(clean_kw), clean_text):
+                    protected_spans.append((m.start(), m.end()))
+                    
+            # 3. NGワードを検索
             for wrong, right in rules.items():
                 if wrong == right or not wrong: continue
                 
-                # 日本語の曖昧なスペースや改行に強い正規表現検索
-                # 文字の間に0個以上の空白文字を許容するパターン
-                pattern = " *".join([re.escape(char) for char in wrong])
-                matches = list(re.finditer(pattern, full_text))
+                clean_wrong = re.sub(r'\s+', '', wrong)
+                if not clean_wrong: continue
                 
-                for m in matches:
-                    # 前後の文脈を確認（保護ワードチェック）
-                    start_idx = max(0, m.start() - 40)
-                    end_idx = min(len(full_text), m.end() + 40)
-                    context = full_text[start_idx:end_idx]
+                for m in re.finditer(re.escape(clean_wrong), clean_text):
+                    # 発見したNGワードが、保護ワードの「内側」にあるか確認
+                    is_protected = False
+                    for p_start, p_end in protected_spans:
+                        if p_start <= m.start() and m.end() <= p_end:
+                            is_protected = True
+                            break
                     
-                    is_protected = any(kw in context for kw in keep_list)
-                    
+                    # 保護されていなければリストに追加
                     if not is_protected:
+                        start_idx = max(0, m.start() - 15)
+                        end_idx = min(len(clean_text), m.end() + 15)
                         results.append({
                             "ページ": i + 1,
-                            "不適切な箇所": wrong,
-                            "修正後の名称": right,
-                            "周辺の文章": f"...{full_text[max(0, m.start()-10):min(len(full_text), m.end()+10)]}..."
+                            "NGワード": wrong,
+                            "修正案": right,
+                            "周辺の文章": f"...{clean_text[start_idx:end_idx]}..."
                         })
     
-    # 重複を排除してソート
-    df = pd.DataFrame(results).drop_duplicates() if results else pd.DataFrame()
-    return df.to_dict('records') if not df.empty else []
+    # 重複を排除
+    if results:
+        df = pd.DataFrame(results).drop_duplicates()
+        return df.to_dict('records')
+    return []
 
 # 4. メイン処理
 uploaded_files = st.file_uploader("ファイルをアップロード (Word, Excel, PPT, PDF)", type=["docx", "xlsx", "pptx", "pdf"], accept_multiple_files=True)
