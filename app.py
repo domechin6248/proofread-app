@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import docx
 from docx.shared import RGBColor
+from docx.oxml.ns import qn  # Wordのフォント設定用に追加
 import openpyxl
 from openpyxl.styles import Font
 from pptx import Presentation
@@ -20,7 +21,7 @@ color_option = st.selectbox("修正箇所の文字色（Word/Excel/PPT用）", [
 color_map = {"赤": (255, 0, 0), "青": (0, 0, 255), "緑": (0, 128, 0), "黒": (0, 0, 0)}
 selected_rgb = color_map[color_option]
 
-# 2. ルールの読み込み（古いルールの記憶を強制リセット ttl=1）
+# 2. ルールの読み込み
 @st.cache_data(ttl=1)
 def load_rules():
     if os.path.exists('rules.csv'):
@@ -29,7 +30,6 @@ def load_rules():
             try:
                 df = pd.read_csv('rules.csv', encoding=enc)
                 if '類義語' in df.columns and '統一語句' in df.columns:
-                    # 空白や空行を除去
                     df = df.dropna(subset=['類義語', '統一語句'])
                     df['類義語'] = df['類義語'].astype(str).str.strip()
                     df['統一語句'] = df['統一語句'].astype(str).str.strip()
@@ -42,9 +42,8 @@ def load_rules():
 
 rules_dict = load_rules()
 
-# 3. 修正・熟語保護ロジック (Word/PDF 全ファイル共通)
-def apply_rules_to_text(target_text, rules):
-    # 【基本保護リスト】
+# 3. 修正・熟語保護・英数字半角化ロジック
+def apply_rules_to_text(target_text, rules, for_reporting=False):
     keep_words = [
         "会員に成長する機会", "会員拡大運動", "会員拡大", "正会員", "新入会員",
         "日本の青年会議所は", "希望をもたらす変革の起点として", 
@@ -53,26 +52,24 @@ def apply_rules_to_text(target_text, rules):
         "志高き組織ビジョン", "志高き人材育成ビジョン", "志高きまち創造ビジョン"
     ]
     
-    # 【追加保護リスト】CSVで「類義語」と「統一語句」が同じものは、保護対象として自動追加
     for k, v in rules.items():
         if k == v and str(k) not in keep_words:
             keep_words.append(str(k))
             
-    # 長い言葉から順に保護する（誤作動防止）
     keep_words = sorted(keep_words, key=len, reverse=True)
     
     protected_text = target_text
     placeholders = {}
     
-    # 保護対象を一時的に「__SAFE_0001__」のような記号に置き換えて守る
+    # 【ステップ1】保護対象を避難させる（英数字を含まない特殊な文字列を使用）
     for i, word in enumerate(keep_words):
         if word in protected_text:
-            placeholder = f"__SAFE_{i:04d}__"
+            placeholder = f"《《保{i:04d}護》》"
             placeholders[placeholder] = word
             protected_text = protected_text.replace(word, placeholder)
 
+    # 【ステップ2】統一ルールの適用
     segments = [(protected_text, protected_text, False)]
-    
     for wrong, right in rules.items():
         if wrong == right or not wrong: continue
         new_segments = []
@@ -80,7 +77,6 @@ def apply_rules_to_text(target_text, rules):
             if already_fixed or str(wrong) not in curr:
                 new_segments.append((orig, curr, already_fixed))
                 continue
-            
             parts = curr.split(str(wrong))
             for j, part in enumerate(parts):
                 if part != "":
@@ -89,27 +85,71 @@ def apply_rules_to_text(target_text, rules):
                     new_segments.append((str(wrong), str(right), True))
         segments = new_segments
 
-    # 保護していた言葉を元に戻す
-    final_segments = []
+    # 【ステップ3】保護していた言葉を元に戻す
+    restored_segments = []
     for orig, curr, is_fixed in segments:
+        temp_orig = orig
+        temp_curr = curr
         if not is_fixed:
-            temp_orig = orig
             for placeholder, original_word in placeholders.items():
                 temp_orig = temp_orig.replace(placeholder, original_word)
-            final_segments.append((temp_orig, temp_orig, False))
+                temp_curr = temp_curr.replace(placeholder, original_word)
+        restored_segments.append((temp_orig, temp_curr, is_fixed))
+
+    # 【ステップ4】英数字の半角化＆フォントフラグ付け（記号は無視）
+    ZEN_ALNUM = "ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ０１２３４５６７８９"
+    HAN_ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    ZEN2HAN_MAP = str.maketrans(ZEN_ALNUM, HAN_ALNUM)
+    
+    # 記号を含まない「純粋な英数字」のみを抽出する正規表現
+    alnum_pattern = r'([A-Za-z0-9Ａ-Ｚａ-ｚ０-９]+)'
+    final_segments = []
+    
+    for orig, curr, is_fixed in restored_segments:
+        if for_reporting and is_fixed:
+            # PDFレポート用：既にルールで修正済みの場合はこれ以上分割しない
+            def replacer(match):
+                return match.group(1).translate(ZEN2HAN_MAP)
+            new_curr = re.sub(alnum_pattern, replacer, curr)
+            has_alnum = bool(re.search(alnum_pattern, new_curr))
+            final_segments.append((orig, new_curr, True, has_alnum))
         else:
-            final_segments.append((orig, curr, True))
+            # 英数字ブロックとそれ以外に分割
+            parts = re.split(alnum_pattern, curr)
+            for i, part in enumerate(parts):
+                if not part: continue
+                if i % 2 == 1:
+                    # 英数字ブロック：半角に変換
+                    half_part = part.translate(ZEN2HAN_MAP)
+                    was_converted = (half_part != part)
+                    
+                    if for_reporting:
+                        part_orig = part
+                        final_segments.append((part_orig, half_part, was_converted, True))
+                    else:
+                        final_segments.append((orig, half_part, is_fixed or was_converted, True))
+                else:
+                    # 日本語や記号ブロック：そのまま
+                    if for_reporting:
+                        final_segments.append((part, part, False, False))
+                    else:
+                        final_segments.append((orig, part, is_fixed, False))
+                        
     return final_segments
 
 # --- ファイル修正用関数 ---
 def repair_docx(file, rules, rgb):
     doc = docx.Document(file)
     for para in doc.paragraphs:
-        parts = apply_rules_to_text(para.text, rules)
-        if any(p[2] for p in parts):
+        parts = apply_rules_to_text(para.text, rules, for_reporting=False)
+        if any(p[2] for p in parts) or any(p[3] for p in parts):
             para.text = ""
-            for orig, curr, is_fixed in parts:
+            for orig, curr, is_fixed, is_alnum in parts:
                 run = para.add_run(curr)
+                if is_alnum:
+                    # 英数字にはMS明朝を適用
+                    run.font.name = 'ＭＳ 明朝'
+                    run._element.rPr.rFonts.set(qn('w:eastAsia'), 'ＭＳ 明朝')
                 if is_fixed:
                     run.font.color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
                     run.bold = False
@@ -124,10 +164,18 @@ def repair_xlsx(file, rules, rgb):
         for row in sheet.iter_rows():
             for cell in row:
                 if cell.value and isinstance(cell.value, str):
-                    parts = apply_rules_to_text(cell.value, rules)
-                    if any(p[2] for p in parts):
+                    parts = apply_rules_to_text(cell.value, rules, for_reporting=False)
+                    if any(p[2] for p in parts) or any(p[3] for p in parts):
                         cell.value = "".join([p[1] for p in parts])
-                        cell.font = Font(color=hex_color, bold=False)
+                        
+                        is_alnum_present = any(p[3] for p in parts)
+                        is_fixed_present = any(p[2] for p in parts)
+                        
+                        current_font_name = cell.font.name if cell.font and cell.font.name else None
+                        new_font_name = 'ＭＳ 明朝' if is_alnum_present else current_font_name
+                        new_color = hex_color if is_fixed_present else (cell.font.color if cell.font else None)
+                        
+                        cell.font = Font(name=new_font_name, color=new_color, bold=False)
     out_io = BytesIO()
     wb.save(out_io)
     return out_io.getvalue()
@@ -139,12 +187,15 @@ def repair_pptx(file, rules, rgb):
             if hasattr(shape, "text_frame") and shape.text_frame:
                 for paragraph in shape.text_frame.paragraphs:
                     combined_text = "".join(run.text for run in paragraph.runs)
-                    parts = apply_rules_to_text(combined_text, rules)
-                    if any(p[2] for p in parts):
+                    parts = apply_rules_to_text(combined_text, rules, for_reporting=False)
+                    if any(p[2] for p in parts) or any(p[3] for p in parts):
                         paragraph.text = ""
-                        for orig, curr, is_fixed in parts:
+                        for orig, curr, is_fixed, is_alnum in parts:
                             new_run = paragraph.add_run()
                             new_run.text = curr
+                            if is_alnum:
+                                # 英数字にはMS明朝を適用
+                                new_run.font.name = 'ＭＳ 明朝'
                             if is_fixed:
                                 new_run.font.color.rgb = PptxRGBColor(rgb[0], rgb[1], rgb[2])
                                 new_run.font.bold = False
@@ -152,10 +203,9 @@ def repair_pptx(file, rules, rgb):
     prs.save(out_io)
     return out_io.getvalue()
 
-# --- PDFチェック用関数 (Wordと全く同じエンジンを使用) ---
+# --- PDFチェック用関数 ---
 def check_pdf(file, rules):
     results = []
-    # PDF特有の見えない文字や空白を完全に消去する設定
     invisible_chars = r'[\s\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\u00A0]+'
     
     with pdfplumber.open(file) as pdf:
@@ -163,21 +213,15 @@ def check_pdf(file, rules):
             text = page.extract_text(x_tolerance=2, y_tolerance=2)
             if not text: continue
             
-            # PDFの文字を「空白のない1本の繋がった文字列」に浄化する
             pure_text = re.sub(invisible_chars, '', text)
-            
-            # Wordと全く同じ関数に投げて判定させる
-            parts = apply_rules_to_text(pure_text, rules)
-            
-            # 前後の文脈を取得するために、文字列を復元
-            full_text = "".join([p[0] for p in parts])
+            parts = apply_rules_to_text(pure_text, rules, for_reporting=True)
+            full_text = "".join([p[1] for p in parts])
             
             current_idx = 0
-            for orig, curr, is_fixed in parts:
+            for orig, curr, is_fixed, is_alnum in parts:
                 if is_fixed:
-                    # NGワードの前後15文字を切り出す
                     start_idx = max(0, current_idx - 15)
-                    end_idx = min(len(full_text), current_idx + len(orig) + 15)
+                    end_idx = min(len(full_text), current_idx + len(curr) + 15)
                     context = full_text[start_idx:end_idx]
                     
                     results.append({
@@ -186,7 +230,7 @@ def check_pdf(file, rules):
                         "修正案": curr,
                         "周辺の文章": f"...{context}..."
                     })
-                current_idx += len(orig)
+                current_idx += len(curr)
                 
     return results
 
